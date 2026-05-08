@@ -1,0 +1,16 @@
+{
+  "name": "reaching-unreal-sync",
+  "version": "0.1.0",
+  "description": "Tiny Yjs websocket sync server for Reaching Unreal",
+  "private": true,
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "y-protocols": "^1.0.6",
+    "ws": "^8.18.0",
+    "yjs": "^13.6.20"
+  }
+}
