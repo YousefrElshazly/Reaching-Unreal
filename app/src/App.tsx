@@ -131,8 +131,8 @@ export default function App() {
               <h1 className="text-xl font-bold text-stone-900 leading-tight">
                 Reaching Unreal
               </h1>
-              <div className="text-xs text-stone-500">
-                Productivity tracker · live collab
+              <div className="text-xs text-stone-500" dir="rtl" lang="ar">
+                انا كسم فيه
               </div>
             </div>
             <div className="ml-auto flex items-center gap-3 text-xs text-stone-500">
