@@ -1,14 +1,68 @@
+import { useEffect, useState } from "react";
 import { CALENDARS } from "../calendars";
 import { setCalendarId, getStore } from "../store/yjs";
 import { useCalendar } from "../hooks/useStore";
 import { labelForWeekStart, parseISO } from "../utils/seasons";
+import {
+  getNotificationStatus,
+  isNotificationSupported,
+  subscribeForReminders,
+  unsubscribeFromReminders,
+  type NotificationStatus,
+} from "../utils/notifications";
+import type { AppUser } from "../types";
 
 interface Props {
   onClose: () => void;
+  me: AppUser | null;
 }
 
-export function SettingsModal({ onClose }: Props) {
+export function SettingsModal({ onClose, me }: Props) {
   const cal = useCalendar();
+  const [notifStatus, setNotifStatus] = useState<NotificationStatus>("default");
+  const [notifBusy, setNotifBusy] = useState(false);
+  const [notifError, setNotifError] = useState<string | null>(null);
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  useEffect(() => {
+    let cancelled = false;
+    getNotificationStatus().then((s) => {
+      if (!cancelled) setNotifStatus(s);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleEnableReminders = async () => {
+    if (!me) {
+      setNotifError("Pick a user identity first (close Settings, tap 'switch').");
+      return;
+    }
+    setNotifBusy(true);
+    setNotifError(null);
+    try {
+      const next = await subscribeForReminders({ userId: me.id });
+      setNotifStatus(next);
+    } catch (e) {
+      setNotifError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNotifBusy(false);
+    }
+  };
+
+  const handleDisableReminders = async () => {
+    setNotifBusy(true);
+    setNotifError(null);
+    try {
+      const next = await unsubscribeFromReminders();
+      setNotifStatus(next);
+    } catch (e) {
+      setNotifError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNotifBusy(false);
+    }
+  };
 
   const sampleDates = [
     "2025-09-27",
@@ -33,6 +87,63 @@ export function SettingsModal({ onClose }: Props) {
         </div>
 
         <div className="p-6 space-y-6">
+          <section>
+            <h3 className="text-sm font-semibold text-stone-700 mb-1">
+              Daily reminder
+            </h3>
+            <p className="text-sm text-stone-500 mb-3">
+              Get a push notification at <strong>11pm {tz}</strong> if today's
+              row is still empty. Set this on each device (phone, laptop) you
+              want to be reminded on.
+            </p>
+
+            <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 flex items-center gap-3">
+              <ReminderStatusDot status={notifStatus} />
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium text-stone-800">
+                  {labelForStatus(notifStatus)}
+                </div>
+                {notifStatus === "denied" && (
+                  <div className="text-xs text-stone-500 mt-0.5">
+                    Notifications are blocked in your browser/PWA settings.
+                    Enable them there, then come back.
+                  </div>
+                )}
+                {notifStatus === "unsupported" && (
+                  <div className="text-xs text-stone-500 mt-0.5">
+                    {!isNotificationSupported()
+                      ? "This browser doesn't support push. On iPhone, install the app from Safari → Share → Add to Home Screen, then open it from the home screen."
+                      : ""}
+                  </div>
+                )}
+                {notifError && (
+                  <div className="text-xs text-rose-600 mt-1">{notifError}</div>
+                )}
+              </div>
+              {notifStatus === "subscribed" ? (
+                <button
+                  onClick={handleDisableReminders}
+                  disabled={notifBusy}
+                  className="px-3 py-1.5 rounded-md bg-stone-200 hover:bg-stone-300 text-sm disabled:opacity-50"
+                >
+                  {notifBusy ? "…" : "Turn off"}
+                </button>
+              ) : (
+                <button
+                  onClick={handleEnableReminders}
+                  disabled={
+                    notifBusy ||
+                    notifStatus === "denied" ||
+                    notifStatus === "unsupported"
+                  }
+                  className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-sm disabled:opacity-50"
+                >
+                  {notifBusy ? "…" : "Enable"}
+                </button>
+              )}
+            </div>
+          </section>
+
           <section>
             <h3 className="text-sm font-semibold text-stone-700 mb-1">
               Calendar
@@ -131,4 +242,31 @@ export function SettingsModal({ onClose }: Props) {
       </div>
     </div>
   );
+}
+
+function ReminderStatusDot({ status }: { status: NotificationStatus }) {
+  const color =
+    status === "subscribed"
+      ? "bg-emerald-500"
+      : status === "denied"
+      ? "bg-rose-400"
+      : status === "unsupported"
+      ? "bg-stone-300"
+      : "bg-amber-400";
+  return <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${color}`} />;
+}
+
+function labelForStatus(status: NotificationStatus): string {
+  switch (status) {
+    case "subscribed":
+      return "Daily reminder is on for this device";
+    case "denied":
+      return "Notifications blocked";
+    case "unsupported":
+      return "Push notifications aren't available here";
+    case "granted-no-subscription":
+      return "Permission granted — finish setup";
+    default:
+      return "Daily reminder is off for this device";
+  }
 }

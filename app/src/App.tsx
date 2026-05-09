@@ -221,7 +221,7 @@ export default function App() {
         <SummaryView data={data} onClose={() => setShowSummary(false)} />
       )}
       {showSettings && (
-        <SettingsModal onClose={() => setShowSettings(false)} />
+        <SettingsModal me={me} onClose={() => setShowSettings(false)} />
       )}
 
       <Cursors />

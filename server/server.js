@@ -13,6 +13,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { WebSocketServer } from "ws";
+import webpush from "web-push";
 import * as Y from "yjs";
 import * as syncProtocol from "y-protocols/sync.js";
 import * as awarenessProtocol from "y-protocols/awareness.js";
@@ -26,6 +27,30 @@ const DATA_DIR = process.env.DATA_DIR || path.resolve("./data");
 const PERSIST_INTERVAL_MS = Number(process.env.PERSIST_INTERVAL_MS || 5_000);
 const MAX_ROOM_NAME_LEN = 256;
 const MAX_PAYLOAD = 16 * 1024 * 1024; // 16 MB safety ceiling per message
+
+// Notifications config -------------------------------------------------------
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY || "";
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || "";
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:reaching-unreal@example.com";
+const CRON_SECRET = process.env.CRON_SECRET || "";
+// The wall-clock hour (0-23) at which to fire the "log your day" reminder, in
+// each subscription's local timezone. Default 23 (= 11pm).
+const REMINDER_HOUR = Number(process.env.REMINDER_HOUR || 23);
+// Allowed origins for the HTTP API (subscribe / unsubscribe). The websocket
+// upgrade is unaffected. Comma-separated list, or "*" to allow any.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "*")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+if (VAPID_PUBLIC && VAPID_PRIVATE) {
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC, VAPID_PRIVATE);
+  console.log("[push] VAPID configured; reminders will fire at hour", REMINDER_HOUR);
+} else {
+  console.warn(
+    "[push] VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY missing — /subscribe and /cron/tick will return 503"
+  );
+}
 
 // Try to create the data directory. If we can't (e.g. ephemeral hosting like
 // Render free tier), fall back to /tmp so the server still runs. Each client
@@ -222,14 +247,331 @@ function getRoom(name) {
   return map.setIfUndefined(rooms, name, () => new Room(name));
 }
 
+// --- Push notifications -----------------------------------------------------
+
+/**
+ * subscriptions.json layout:
+ *   [{ endpoint, keys, room, userId, timezone, lastNotifiedDate? }]
+ *
+ * Persisted alongside Yjs snapshots so it survives restarts on hosts with a
+ * writable data dir. On ephemeral hosts (Render free tier without a disk) the
+ * file is rewritten on every change but is lost on redeploy — devices will
+ * just re-subscribe automatically when the user next opens the app and the
+ * server replies that their endpoint is unknown.
+ */
+const SUBS_FILE = path.join(persistEnabled ? DATA_DIR : "/tmp", "subscriptions.json");
+let subscriptions = [];
+try {
+  if (fs.existsSync(SUBS_FILE)) {
+    subscriptions = JSON.parse(fs.readFileSync(SUBS_FILE, "utf8"));
+    console.log(`[push] loaded ${subscriptions.length} subscription(s)`);
+  }
+} catch (e) {
+  console.warn("[push] could not load subscriptions:", e?.message ?? e);
+  subscriptions = [];
+}
+
+function saveSubscriptions() {
+  try {
+    fs.writeFileSync(SUBS_FILE, JSON.stringify(subscriptions));
+  } catch (e) {
+    console.warn("[push] could not save subscriptions:", e?.message ?? e);
+  }
+}
+
+function isOriginAllowed(origin) {
+  if (!origin) return true;
+  if (ALLOWED_ORIGINS.includes("*")) return true;
+  return ALLOWED_ORIGINS.includes(origin);
+}
+
+function applyCors(req, res) {
+  const origin = req.headers.origin;
+  if (origin && isOriginAllowed(origin)) {
+    res.setHeader("access-control-allow-origin", origin);
+    res.setHeader("access-control-allow-methods", "GET,POST,DELETE,OPTIONS");
+    res.setHeader("access-control-allow-headers", "content-type,x-cron-secret");
+    res.setHeader("access-control-max-age", "86400");
+  }
+}
+
+function readJson(req, max = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let total = 0;
+    const chunks = [];
+    req.on("data", (c) => {
+      total += c.length;
+      if (total > max) {
+        reject(new Error("payload too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => {
+      try {
+        const raw = Buffer.concat(chunks).toString("utf8") || "{}";
+        resolve(JSON.parse(raw));
+      } catch (e) {
+        reject(e);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function isValidTimezone(tz) {
+  if (typeof tz !== "string" || tz.length > 64) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns true if the given user has zero (or no) values logged for "today" in
+ * the active week of the supplied room. "Today" is computed in the supplied
+ * IANA timezone. The lookup uses the live in-memory Y.Doc so server-side
+ * checks always see the latest synced state from any device.
+ */
+function isTodayZeroForUser(roomName, userId, timezone) {
+  const room = rooms.get(roomName);
+  if (!room) return false; // can't decide → don't spam
+  const structureRaw = room.doc.getMap("structure").get("json");
+  if (typeof structureRaw !== "string") return false;
+  let weeks;
+  try {
+    weeks = JSON.parse(structureRaw);
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(weeks) || weeks.length === 0) return false;
+
+  // Find the week whose Saturday-anchored window contains "today" in the user's
+  // timezone. Falls back to the most recent week if "today" is past the last
+  // logged week (the user simply hasn't created the new week yet).
+  const todayStr = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date()); // "YYYY-MM-DD"
+
+  let week = null;
+  for (const w of weeks) {
+    if (w.startDate <= todayStr && todayStr <= w.endDate) {
+      week = w;
+      break;
+    }
+  }
+  if (!week) {
+    // "today" is after the last logged week → the table doesn't even exist
+    // yet for today, which counts as zeroed.
+    const last = weeks[weeks.length - 1];
+    if (todayStr > last.endDate) return true;
+    return false;
+  }
+
+  const table = week.tables.find((t) => t.userId === userId);
+  if (!table) return true; // user hasn't joined this week → zero
+
+  // Day name from the day-of-week in the timezone
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    weekday: "long",
+  }).format(new Date());
+
+  const cells = room.doc.getMap("cells");
+  for (const col of table.columns) {
+    const k = `${week.id}:${userId}:${weekday}:${col.id}`;
+    const v = cells.get(k);
+    if (typeof v === "number" && v > 0) return false;
+  }
+  return true;
+}
+
+async function sendReminderTo(sub) {
+  const payload = JSON.stringify({
+    title: "Reaching Unreal",
+    body: "log your day, get those points ..",
+    tag: "ru-daily",
+    url: "/",
+  });
+  try {
+    await webpush.sendNotification(
+      { endpoint: sub.endpoint, keys: sub.keys },
+      payload,
+      { TTL: 60 * 60 * 6 } // expires in 6h if device is offline
+    );
+    return { ok: true };
+  } catch (e) {
+    const status = e?.statusCode || 0;
+    // 404/410 = subscription is dead; drop it.
+    if (status === 404 || status === 410) {
+      subscriptions = subscriptions.filter((s) => s.endpoint !== sub.endpoint);
+      saveSubscriptions();
+      return { ok: false, dropped: true, status };
+    }
+    return { ok: false, status, error: e?.message || String(e) };
+  }
+}
+
+async function runReminderTick() {
+  if (!VAPID_PUBLIC || !VAPID_PRIVATE) return { ok: false, error: "vapid-missing" };
+  const results = [];
+  // Snapshot to avoid mutating during iteration
+  for (const sub of [...subscriptions]) {
+    let hour;
+    let dateKey;
+    try {
+      hour = Number(
+        new Intl.DateTimeFormat("en-US", {
+          timeZone: sub.timezone,
+          hour: "2-digit",
+          hour12: false,
+        }).format(new Date())
+      );
+      dateKey = new Intl.DateTimeFormat("en-CA", {
+        timeZone: sub.timezone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date());
+    } catch (e) {
+      results.push({ endpoint: sub.endpoint.slice(-12), skipped: "bad-tz" });
+      continue;
+    }
+    if (hour !== REMINDER_HOUR) {
+      results.push({ endpoint: sub.endpoint.slice(-12), skipped: `hour=${hour}` });
+      continue;
+    }
+    if (sub.lastNotifiedDate === dateKey) {
+      results.push({ endpoint: sub.endpoint.slice(-12), skipped: "already-sent-today" });
+      continue;
+    }
+    if (!isTodayZeroForUser(sub.room, sub.userId, sub.timezone)) {
+      results.push({ endpoint: sub.endpoint.slice(-12), skipped: "already-logged" });
+      continue;
+    }
+    const r = await sendReminderTo(sub);
+    if (r.ok) {
+      sub.lastNotifiedDate = dateKey;
+      saveSubscriptions();
+      results.push({ endpoint: sub.endpoint.slice(-12), sent: true });
+    } else {
+      results.push({ endpoint: sub.endpoint.slice(-12), error: r });
+    }
+  }
+  return { ok: true, results };
+}
+
 // --- HTTP + WebSocket --------------------------------------------------------
 
-const server = http.createServer((req, res) => {
-  if (req.url === "/" || req.url === "/healthz") {
-    res.writeHead(200, { "content-type": "text/plain" });
-    res.end(`Reaching Unreal sync OK · rooms=${rooms.size}`);
+const server = http.createServer(async (req, res) => {
+  applyCors(req, res);
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
     return;
   }
+
+  if (req.url === "/" || req.url === "/healthz") {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end(
+      `Reaching Unreal sync OK · rooms=${rooms.size} · subs=${subscriptions.length}`
+    );
+    return;
+  }
+
+  if (req.url === "/vapid-public-key" && req.method === "GET") {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end(VAPID_PUBLIC);
+    return;
+  }
+
+  if (req.url === "/subscribe" && req.method === "POST") {
+    if (!VAPID_PUBLIC || !VAPID_PRIVATE) {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "push-not-configured" }));
+      return;
+    }
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "bad-json" }));
+      return;
+    }
+    const { subscription, room, userId, timezone } = body || {};
+    if (
+      !subscription?.endpoint ||
+      !subscription?.keys?.p256dh ||
+      !subscription?.keys?.auth ||
+      typeof room !== "string" ||
+      !room ||
+      typeof userId !== "string" ||
+      !userId ||
+      !isValidTimezone(timezone)
+    ) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "bad-fields" }));
+      return;
+    }
+    const entry = {
+      endpoint: subscription.endpoint,
+      keys: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth },
+      room,
+      userId,
+      timezone,
+    };
+    const idx = subscriptions.findIndex((s) => s.endpoint === entry.endpoint);
+    if (idx >= 0) subscriptions[idx] = entry;
+    else subscriptions.push(entry);
+    saveSubscriptions();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, count: subscriptions.length }));
+    return;
+  }
+
+  if (req.url?.startsWith("/unsubscribe") && req.method === "POST") {
+    let body;
+    try {
+      body = await readJson(req);
+    } catch {
+      body = {};
+    }
+    const ep = body?.endpoint;
+    if (typeof ep === "string") {
+      const before = subscriptions.length;
+      subscriptions = subscriptions.filter((s) => s.endpoint !== ep);
+      if (subscriptions.length !== before) saveSubscriptions();
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  if (req.url?.startsWith("/cron/tick") && (req.method === "POST" || req.method === "GET")) {
+    if (CRON_SECRET) {
+      const supplied =
+        req.headers["x-cron-secret"] ||
+        new URL(req.url, "http://x").searchParams.get("secret");
+      if (supplied !== CRON_SECRET) {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+    }
+    const r = await runReminderTick();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(r));
+    return;
+  }
+
   res.writeHead(404);
   res.end();
 });

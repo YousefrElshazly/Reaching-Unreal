@@ -9,8 +9,9 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "y-protocols": "^1.0.6",
+    "web-push": "^3.6.7",
     "ws": "^8.18.0",
+    "y-protocols": "^1.0.6",
     "yjs": "^13.6.20"
   }
 }

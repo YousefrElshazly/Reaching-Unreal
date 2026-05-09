@@ -12,3 +12,15 @@ services:
         value: production
       - key: DATA_DIR
         value: /tmp/ru-data
+      # Push notifications. Set these in the Render dashboard
+      # (Settings → Environment) — never commit them to git.
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
