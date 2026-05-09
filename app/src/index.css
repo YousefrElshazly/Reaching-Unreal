@@ -8,6 +8,20 @@ body,
   height: 100%;
 }
 
+/* Respect iOS notch / Dynamic Island / home indicator. The header sits under
+ * the status bar by design (translucent), so we pad it with the top inset.
+ * Horizontal insets matter in landscape on devices with side notches. */
+.ru-safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+.ru-safe-bottom {
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}
+.ru-safe-x {
+  padding-left: max(env(safe-area-inset-left), 0px);
+  padding-right: max(env(safe-area-inset-right), 0px);
+}
+
 input.ru-cell {
   width: 100%;
   height: 100%;

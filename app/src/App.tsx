@@ -121,21 +121,27 @@ export default function App() {
     <div className="min-h-full">
       {!me && <IdentityPicker users={data.users} onPick={handlePick} />}
 
-      <header className="sticky top-0 z-30 bg-stone-50/95 backdrop-blur border-b border-stone-200">
-        <div className="max-w-[1400px] mx-auto px-6 pt-4 pb-3">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-8 h-8 rounded-lg bg-emerald-600 flex items-center justify-center text-white font-bold">
+      <header
+        className="sticky top-0 z-30 bg-stone-50/95 backdrop-blur border-b border-stone-200 ru-safe-top"
+      >
+        <div className="max-w-[1400px] mx-auto px-4 sm:px-6 pt-3 sm:pt-4 pb-3 ru-safe-x">
+          <div className="flex items-center gap-2.5 sm:gap-3 mb-2.5 sm:mb-3">
+            <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-emerald-600 flex items-center justify-center text-white font-bold flex-shrink-0">
               ✓
             </div>
-            <div>
-              <h1 className="text-xl font-bold text-stone-900 leading-tight">
+            <div className="min-w-0">
+              <h1 className="text-base sm:text-xl font-bold text-stone-900 leading-tight truncate">
                 Reaching Unreal
               </h1>
-              <div className="text-xs text-stone-500" dir="rtl" lang="ar">
+              <div
+                className="text-[11px] sm:text-xs text-stone-500 truncate"
+                dir="rtl"
+                lang="ar"
+              >
                 انا كسم فيه
               </div>
             </div>
-            <div className="ml-auto flex items-center gap-3 text-xs text-stone-500">
+            <div className="ml-auto flex items-center gap-2 sm:gap-3 text-xs text-stone-500 flex-shrink-0">
               <SyncBadge status={syncStatus} />
               {me && (
                 <>
@@ -143,13 +149,16 @@ export default function App() {
                     className="w-2 h-2 rounded-full"
                     style={{ backgroundColor: me.color }}
                   />
-                  <span>signed in as <strong>{me.name}</strong></span>
+                  <span className="hidden sm:inline">
+                    signed in as <strong>{me.name}</strong>
+                  </span>
+                  <strong className="sm:hidden">{me.name}</strong>
                   <button
                     onClick={() => {
                       localStorage.removeItem(ME_KEY);
                       setMe(null);
                     }}
-                    className="ml-1 underline text-stone-500 hover:text-stone-700"
+                    className="ml-0.5 sm:ml-1 underline text-stone-500 hover:text-stone-700"
                   >
                     switch
                   </button>
@@ -168,7 +177,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-[1400px] mx-auto px-6 py-6">
+      <main className="max-w-[1400px] mx-auto px-3 sm:px-6 py-4 sm:py-6 ru-safe-x ru-safe-bottom">
         {!week && (
           <div className="text-center text-stone-500 py-20">
             No week selected.
