@@ -27,7 +27,25 @@ const PERSIST_INTERVAL_MS = Number(process.env.PERSIST_INTERVAL_MS || 5_000);
 const MAX_ROOM_NAME_LEN = 256;
 const MAX_PAYLOAD = 16 * 1024 * 1024; // 16 MB safety ceiling per message
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
+// Try to create the data directory. If we can't (e.g. ephemeral hosting like
+// Render free tier), fall back to /tmp so the server still runs. Each client
+// has the full Yjs history in IndexedDB, so even when the server's state is
+// wiped on a restart the next reconnecting client uploads its full doc and
+// the server is whole again.
+let persistEnabled = true;
+try {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  // Probe writability
+  const probe = path.join(DATA_DIR, ".write-probe");
+  fs.writeFileSync(probe, "ok");
+  fs.unlinkSync(probe);
+} catch (e) {
+  console.warn(
+    `[boot] DATA_DIR=${DATA_DIR} not writable (${e?.code ?? e?.message}); persistence disabled. ` +
+      `Server still works — client IndexedDB acts as the durable store.`
+  );
+  persistEnabled = false;
+}
 
 // --- Per-room state ----------------------------------------------------------
 
@@ -44,15 +62,17 @@ class Room {
     this.dirty = false;
 
     // Restore from disk if we have a snapshot
-    const snap = path.join(DATA_DIR, `${this.safeFile()}.bin`);
-    try {
-      if (fs.existsSync(snap)) {
-        const buf = fs.readFileSync(snap);
-        Y.applyUpdate(this.doc, new Uint8Array(buf));
-        console.log(`[room ${name}] restored ${buf.length} bytes from disk`);
+    if (persistEnabled) {
+      const snap = path.join(DATA_DIR, `${this.safeFile()}.bin`);
+      try {
+        if (fs.existsSync(snap)) {
+          const buf = fs.readFileSync(snap);
+          Y.applyUpdate(this.doc, new Uint8Array(buf));
+          console.log(`[room ${name}] restored ${buf.length} bytes from disk`);
+        }
+      } catch (e) {
+        console.warn(`[room ${name}] restore failed:`, e?.message ?? e);
       }
-    } catch (e) {
-      console.warn(`[room ${name}] restore failed:`, e?.message ?? e);
     }
 
     this.doc.on("update", (update, origin) => {
@@ -88,7 +108,7 @@ class Room {
   }
 
   persist() {
-    if (!this.dirty) return;
+    if (!this.dirty || !persistEnabled) return;
     const update = Y.encodeStateAsUpdate(this.doc);
     const file = path.join(DATA_DIR, `${this.safeFile()}.bin`);
     try {
