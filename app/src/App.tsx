@@ -124,7 +124,7 @@ export default function App() {
       <header
         className="sticky top-0 z-30 bg-stone-50/95 backdrop-blur border-b border-stone-200 ru-safe-top"
       >
-        <div className="max-w-[1400px] mx-auto px-4 sm:px-6 pt-3 sm:pt-4 pb-3 ru-safe-x">
+        <div className="max-w-[1400px] mx-auto pt-3 sm:pt-4 pb-3 ru-safe-x">
           <div className="flex items-center gap-2.5 sm:gap-3 mb-2.5 sm:mb-3">
             <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-emerald-600 flex items-center justify-center text-white font-bold flex-shrink-0">
               ✓
@@ -177,7 +177,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-[1400px] mx-auto px-3 sm:px-6 py-4 sm:py-6 ru-safe-x ru-safe-bottom">
+      <main className="max-w-[1400px] mx-auto py-4 sm:py-6 ru-safe-x ru-safe-bottom">
         {!week && (
           <div className="text-center text-stone-500 py-20">
             No week selected.

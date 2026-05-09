@@ -17,9 +17,19 @@ body,
 .ru-safe-bottom {
   padding-bottom: max(1rem, env(safe-area-inset-bottom));
 }
+/* Comfortable side gutter on phones; respects the landscape notch via env(),
+ * and a Tailwind sm:px-6 utility wins on tablet/desktop because of media-query
+ * specificity. The !important keeps it from being shadowed by Tailwind utilities
+ * that share specificity but happen to be emitted later in the bundle. */
 .ru-safe-x {
-  padding-left: max(env(safe-area-inset-left), 0px);
-  padding-right: max(env(safe-area-inset-right), 0px);
+  padding-left: max(env(safe-area-inset-left), 1.25rem) !important;
+  padding-right: max(env(safe-area-inset-right), 1.25rem) !important;
+}
+@media (min-width: 640px) {
+  .ru-safe-x {
+    padding-left: max(env(safe-area-inset-left), 1.5rem) !important;
+    padding-right: max(env(safe-area-inset-right), 1.5rem) !important;
+  }
 }
 
 input.ru-cell {
