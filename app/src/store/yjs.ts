@@ -521,12 +521,34 @@ export function setNote(
 
 // ---------- Plans ----------
 
+/**
+ * Plans created before we switched to date-anchored ranges stored
+ * `startWeekId`/`endWeekId` instead of `startDate`/`endDate`. Resolve the
+ * dates from the current structure on read so legacy data keeps working
+ * without an explicit migration write.
+ */
+function resolveLegacyPlan(store: Store, raw: Plan): Plan {
+  if (raw.startDate && raw.endDate) return raw;
+  const weeks = getStructure(store);
+  const start = raw.startWeekId
+    ? weeks.find((w) => w.id === raw.startWeekId)?.startDate
+    : undefined;
+  const end = raw.endWeekId
+    ? weeks.find((w) => w.id === raw.endWeekId)?.startDate
+    : undefined;
+  return {
+    ...raw,
+    startDate: start ?? raw.startDate ?? "",
+    endDate: end ?? raw.endDate ?? "",
+  };
+}
+
 export function getPlans(store: Store): Plan[] {
   const out: Plan[] = [];
   store.plans.forEach((raw) => {
     if (typeof raw !== "string") return;
     try {
-      out.push(JSON.parse(raw) as Plan);
+      out.push(resolveLegacyPlan(store, JSON.parse(raw) as Plan));
     } catch {
       /* ignore corrupt entry */
     }
@@ -538,7 +560,7 @@ export function getPlan(store: Store, planId: string): Plan | null {
   const raw = store.plans.get(planId);
   if (typeof raw !== "string") return null;
   try {
-    return JSON.parse(raw) as Plan;
+    return resolveLegacyPlan(store, JSON.parse(raw) as Plan);
   } catch {
     return null;
   }

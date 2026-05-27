@@ -74,16 +74,27 @@ export interface PlanGoal {
   target: number;
 }
 
-/** A user-assigned plan spanning a contiguous range of weeks. */
+/** A user-assigned plan spanning a contiguous range of weeks.
+ *
+ * Ranges are anchored to ISO Saturday dates (YYYY-MM-DD) rather than week
+ * ids. That lets plans cover future weeks that haven't been auto-created
+ * yet — once those weeks roll around and are materialized, they slot
+ * naturally into the plan's range without any migration needed.
+ */
 export interface Plan {
   id: string;
   name: string;
   /** Which user this plan belongs to. Matches AppUser.id. */
   userId: string;
-  /** Week.id of the first week in the range (inclusive). */
-  startWeekId: string;
-  /** Week.id of the last week in the range (inclusive). */
-  endWeekId: string;
+  /** ISO date (YYYY-MM-DD) of the first week's Saturday, inclusive. */
+  startDate: string;
+  /** ISO date (YYYY-MM-DD) of the last week's Saturday, inclusive. */
+  endDate: string;
+  /** @deprecated Legacy: pre-dates-anchored plans referenced weeks by id.
+   * Reads migrate them transparently via resolveLegacyPlan(). */
+  startWeekId?: string;
+  /** @deprecated see startWeekId. */
+  endWeekId?: string;
   goals: PlanGoal[];
   /** Free-form description / notes about the plan as a whole. */
   notes?: string;

@@ -7,7 +7,7 @@
 //     still opens when not.
 //   - For other GETs, stale-while-revalidate.
 
-const VERSION = "ru-v5";
+const VERSION = "ru-v6";
 const SHELL = ["/", "/index.html", "/manifest.webmanifest", "/favicon.svg"];
 
 self.addEventListener("install", (e) => {

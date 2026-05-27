@@ -127,11 +127,6 @@ export default function App() {
     [data.weeks, currentId]
   );
 
-  const handleAddWeek = () => {
-    const w = addWeekAfterLast(getStore());
-    if (w) setCurrentId(w.id);
-  };
-
   // If user has no table for this week (e.g. guest), give them an "add my table" affordance.
   const hasMyTable = !!(me && week?.tables.some((t) => t.userId === me.id));
 
@@ -196,7 +191,6 @@ export default function App() {
             weeks={data.weeks}
             currentId={currentId}
             onSelect={setCurrentId}
-            onAddWeek={handleAddWeek}
             onShowSummary={() => setShowSummary(true)}
             onShowPlans={() => setShowPlans(true)}
             onShowSettings={() => setShowSettings(true)}

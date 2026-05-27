@@ -6,7 +6,6 @@ interface Props {
   weeks: Week[];
   currentId: string;
   onSelect: (id: string) => void;
-  onAddWeek: () => void;
   onShowSummary: () => void;
   onShowPlans: () => void;
   onShowSettings: () => void;
@@ -16,7 +15,6 @@ export function WeekNav({
   weeks,
   currentId,
   onSelect,
-  onAddWeek,
   onShowSummary,
   onShowPlans,
   onShowSettings,
@@ -80,12 +78,6 @@ export function WeekNav({
         className="px-3 py-1.5 rounded-md bg-emerald-100 text-emerald-800 hover:bg-emerald-200 text-sm font-medium"
       >
         Today
-      </button>
-      <button
-        onClick={onAddWeek}
-        className="px-3 py-1.5 rounded-md bg-stone-900 text-white hover:bg-stone-800 text-sm font-medium"
-      >
-        + New Week
       </button>
       <button
         onClick={onShowSummary}

@@ -22,15 +22,47 @@ interface Props {
   onJumpToWeek?: (weekId: string) => void;
 }
 
-/** Picks the slice of weeks in [startWeekId, endWeekId] inclusive, in
- * chronological order (the order they appear in data.weeks). */
-function weekRange(weeks: Week[], startId: string, endId: string): Week[] {
-  const startIdx = weeks.findIndex((w) => w.id === startId);
-  const endIdx = weeks.findIndex((w) => w.id === endId);
-  if (startIdx < 0 || endIdx < 0) return [];
-  const lo = Math.min(startIdx, endIdx);
-  const hi = Math.max(startIdx, endIdx);
-  return weeks.slice(lo, hi + 1);
+/** Pick the slice of weeks whose Saturday start falls in
+ * [startDate, endDate] inclusive. Auto-orders the dates so picking
+ * "end before start" still yields a non-empty range. Returns only weeks
+ * that have already been materialized — future weeks not yet created
+ * are simply absent until auto-week-generation catches up. */
+function weekRange(weeks: Week[], startDate: string, endDate: string): Week[] {
+  if (!startDate || !endDate) return [];
+  const lo = startDate < endDate ? startDate : endDate;
+  const hi = startDate < endDate ? endDate : startDate;
+  return weeks
+    .filter((w) => w.startDate >= lo && w.startDate <= hi)
+    .slice()
+    .sort((a, b) => a.startDate.localeCompare(b.startDate));
+}
+
+/** Total number of Saturday-anchored weeks in the inclusive date range,
+ * regardless of whether each one has been materialized as a Week yet. */
+function totalWeeksInRange(startDate: string, endDate: string): number {
+  if (!startDate || !endDate) return 0;
+  const a = parseISO(startDate < endDate ? startDate : endDate);
+  const b = parseISO(startDate < endDate ? endDate : startDate);
+  const days = Math.round((b.getTime() - a.getTime()) / 86400000);
+  return Math.floor(days / 7) + 1;
+}
+
+function fmtIso(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+}
+
+/** Snap an arbitrary date to the Saturday on or before it (our weeks are
+ * Saturday-anchored). Returns YYYY-MM-DD. */
+function snapToSaturday(iso: string): string {
+  if (!iso) return "";
+  const d = parseISO(iso);
+  d.setHours(0, 0, 0, 0);
+  // JS getDay: Sun=0..Sat=6. Distance back to Saturday:
+  const offset = (d.getDay() - 6 + 7) % 7;
+  d.setDate(d.getDate() - offset);
+  return fmtIso(d);
 }
 
 /** Sum the values in a user's columns whose name matches `tag`
@@ -177,14 +209,19 @@ function PlanList({
     <div className="grid gap-3 sm:grid-cols-2">
       {plans.map((p) => {
         const user = data.users.find((u) => u.id === p.userId);
-        const range = weekRange(data.weeks, p.startWeekId, p.endWeekId);
+        const range = weekRange(data.weeks, p.startDate, p.endDate);
+        const totalWks = totalWeeksInRange(p.startDate, p.endDate);
         const totals = p.goals.map((g) => ({
           g,
           total: computeGoalTotal(range, p.userId, g.tag),
         }));
         const avg = averageSatisfaction(totals);
-        const start = range[0];
-        const end = range[range.length - 1];
+        const startLbl = p.startDate
+          ? calendar.labelForWeekStart(parseISO(p.startDate)).short
+          : "?";
+        const endLbl = p.endDate
+          ? calendar.labelForWeekStart(parseISO(p.endDate)).short
+          : "?";
         return (
           <button
             key={p.id}
@@ -203,19 +240,15 @@ function PlanList({
                   {p.name || "(untitled plan)"}
                 </div>
                 <div className="text-xs text-stone-500 mt-0.5">
-                  {user?.name ?? "Unknown"} ·{" "}
-                  {start && end ? (
-                    <>
-                      {calendar.labelForWeekStart(parseISO(start.startDate)).short}
-                      {" → "}
-                      {calendar.labelForWeekStart(parseISO(end.startDate)).short}
-                      <span className="text-stone-400 ml-1">
-                        ({range.length} wk)
-                      </span>
-                    </>
-                  ) : (
-                    "no range"
-                  )}
+                  {user?.name ?? "Unknown"} · {startLbl} → {endLbl}
+                  <span className="text-stone-400 ml-1">
+                    ({totalWks} wk
+                    {totalWks === 1 ? "" : "s"}
+                    {range.length < totalWks
+                      ? `, ${range.length} logged`
+                      : ""}
+                    )
+                  </span>
                 </div>
               </div>
               <div
@@ -277,28 +310,34 @@ function PlanCreateForm({
   const calendar = useCalendar();
   const [name, setName] = useState("");
   const [userId, setUserId] = useState(defaultUserId);
-  const [startWeekId, setStartWeekId] = useState(
-    data.weeks[0]?.id ?? ""
-  );
-  const [endWeekId, setEndWeekId] = useState(
-    data.weeks[data.weeks.length - 1]?.id ?? ""
-  );
+  // Default: this week's Saturday → 4 weeks out, so a "new plan" reads as
+  // "plan for the next month" out of the box.
+  const todaySaturday = snapToSaturday(fmtIso(new Date()));
+  const fourWeeksOut = (() => {
+    const d = parseISO(todaySaturday);
+    d.setDate(d.getDate() + 7 * 4);
+    return fmtIso(d);
+  })();
+  const [startDate, setStartDate] = useState(todaySaturday);
+  const [endDate, setEndDate] = useState(fourWeeksOut);
 
   const submit = () => {
-    if (!name.trim() || !startWeekId || !endWeekId || !userId) return;
+    if (!name.trim() || !startDate || !endDate || !userId) return;
     const id = newPlanId();
     const plan: Plan = {
       id,
       name: name.trim(),
       userId,
-      startWeekId,
-      endWeekId,
+      startDate,
+      endDate,
       goals: [],
       createdAt: Date.now(),
     };
     upsertPlan(getStore(), plan);
     onCreated(id);
   };
+
+  const totalWks = totalWeeksInRange(startDate, endDate);
 
   return (
     <div className="max-w-xl mx-auto space-y-4">
@@ -334,31 +373,38 @@ function PlanCreateForm({
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <label className="block">
           <span className="text-xs uppercase tracking-wider text-stone-500">
-            Start week
+            Start date
           </span>
-          <WeekPicker
-            value={startWeekId}
-            onChange={setStartWeekId}
+          <SaturdayPicker
+            value={startDate}
+            onChange={setStartDate}
             weeks={data.weeks}
             calendar={calendar}
           />
         </label>
         <label className="block">
           <span className="text-xs uppercase tracking-wider text-stone-500">
-            End week
+            End date
           </span>
-          <WeekPicker
-            value={endWeekId}
-            onChange={setEndWeekId}
+          <SaturdayPicker
+            value={endDate}
+            onChange={setEndDate}
             weeks={data.weeks}
             calendar={calendar}
           />
         </label>
       </div>
+      {totalWks > 0 && (
+        <div className="text-xs text-stone-500">
+          Spans <strong>{totalWks}</strong> week{totalWks === 1 ? "" : "s"}.
+          Weeks that haven't happened yet will be picked up automatically as
+          they're created.
+        </div>
+      )}
       <div className="flex gap-2 pt-2">
         <button
           onClick={submit}
-          disabled={!name.trim() || !startWeekId || !endWeekId}
+          disabled={!name.trim() || !startDate || !endDate}
           className="px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium disabled:opacity-50"
         >
           Create plan
@@ -374,34 +420,54 @@ function PlanCreateForm({
   );
 }
 
-function WeekPicker({
+/** Date-of-Saturday picker. The user can choose any date in the past or
+ * future; we snap to the Saturday on or before it and surface which
+ * calendar week that resolves to so they know what they picked. */
+function SaturdayPicker({
   value,
   onChange,
   weeks,
   calendar,
 }: {
+  /** ISO Saturday date the picker is currently anchored to. */
   value: string;
-  onChange: (id: string) => void;
+  onChange: (iso: string) => void;
   weeks: Week[];
   calendar: Calendar;
 }) {
+  const matchedWeek = weeks.find((w) => w.startDate === value);
+  const date = value ? parseISO(value) : null;
+  const lbl = date ? calendar.labelForWeekStart(date) : null;
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="mt-1 w-full px-3 py-2 rounded-md border border-stone-300 text-sm bg-white"
-    >
-      {weeks.map((w) => {
-        const lbl = calendar.labelForWeekStart(parseISO(w.startDate));
-        return (
-          <option key={w.id} value={w.id}>
-            {lbl.short} · Wk {w.weekNumber} ·{" "}
-            {formatRange(parseISO(w.startDate), parseISO(w.endDate))}
-          </option>
-        );
-      })}
-    </select>
+    <div className="mt-1 space-y-1">
+      <input
+        type="date"
+        value={value}
+        onChange={(e) => onChange(snapToSaturday(e.target.value))}
+        className="w-full px-3 py-2 rounded-md border border-stone-300 text-sm bg-white"
+      />
+      {date && lbl && (
+        <div className="text-[11px] text-stone-500 leading-tight">
+          <span className="font-medium text-stone-700">{lbl.short}</span>{" "}
+          <span className="text-stone-400">·</span>{" "}
+          {formatRange(date, addDays(date, 6))}
+          {matchedWeek ? (
+            <span className="ml-1 text-stone-400">
+              · Wk {matchedWeek.weekNumber}
+            </span>
+          ) : (
+            <span className="ml-1 text-amber-600">· future (not created yet)</span>
+          )}
+        </div>
+      )}
+    </div>
   );
+}
+
+function addDays(d: Date, n: number): Date {
+  const out = new Date(d);
+  out.setDate(out.getDate() + n);
+  return out;
 }
 
 // ---------- Detail ----------
@@ -423,13 +489,14 @@ function PlanDetail({
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(plan.name);
   const [draftUserId, setDraftUserId] = useState(plan.userId);
-  const [draftStart, setDraftStart] = useState(plan.startWeekId);
-  const [draftEnd, setDraftEnd] = useState(plan.endWeekId);
+  const [draftStart, setDraftStart] = useState(plan.startDate);
+  const [draftEnd, setDraftEnd] = useState(plan.endDate);
 
   const range = useMemo(
-    () => weekRange(data.weeks, plan.startWeekId, plan.endWeekId),
-    [data.weeks, plan.startWeekId, plan.endWeekId]
+    () => weekRange(data.weeks, plan.startDate, plan.endDate),
+    [data.weeks, plan.startDate, plan.endDate]
   );
+  const totalWks = totalWeeksInRange(plan.startDate, plan.endDate);
 
   const goalRows = useMemo(
     () =>
@@ -462,8 +529,11 @@ function PlanDetail({
     updatePlan(getStore(), plan.id, {
       name: draftName.trim(),
       userId: draftUserId,
-      startWeekId: draftStart,
-      endWeekId: draftEnd,
+      startDate: draftStart,
+      endDate: draftEnd,
+      // Clear legacy weekId pointers once we've upgraded to date-anchored.
+      startWeekId: undefined,
+      endWeekId: undefined,
     });
     setEditing(false);
   };
@@ -496,17 +566,14 @@ function PlanDetail({
                 </h3>
               </div>
               <div className="text-xs text-stone-500 mt-1">
-                Assigned to <strong>{user?.name ?? "?"}</strong> · {range.length}{" "}
-                week{range.length === 1 ? "" : "s"} ·{" "}
-                {range[0] && range[range.length - 1] && (
+                Assigned to <strong>{user?.name ?? "?"}</strong> · {totalWks}{" "}
+                week{totalWks === 1 ? "" : "s"} (
+                {range.length} logged) ·{" "}
+                {plan.startDate && plan.endDate && (
                   <>
-                    {calendar.labelForWeekStart(parseISO(range[0].startDate)).short}
+                    {calendar.labelForWeekStart(parseISO(plan.startDate)).short}
                     {" → "}
-                    {
-                      calendar.labelForWeekStart(
-                        parseISO(range[range.length - 1].startDate)
-                      ).short
-                    }
+                    {calendar.labelForWeekStart(parseISO(plan.endDate)).short}
                   </>
                 )}
               </div>
@@ -556,13 +623,13 @@ function PlanDetail({
                   </option>
                 ))}
               </select>
-              <WeekPicker
+              <SaturdayPicker
                 value={draftStart}
                 onChange={setDraftStart}
                 weeks={data.weeks}
                 calendar={calendar}
               />
-              <WeekPicker
+              <SaturdayPicker
                 value={draftEnd}
                 onChange={setDraftEnd}
                 weeks={data.weeks}
@@ -581,8 +648,8 @@ function PlanDetail({
                   setEditing(false);
                   setDraftName(plan.name);
                   setDraftUserId(plan.userId);
-                  setDraftStart(plan.startWeekId);
-                  setDraftEnd(plan.endWeekId);
+                  setDraftStart(plan.startDate);
+                  setDraftEnd(plan.endDate);
                 }}
                 className="px-4 py-2 rounded-md bg-stone-100 hover:bg-stone-200 text-sm"
               >
