@@ -11,6 +11,7 @@ import { WeekTable } from "./components/WeekTable";
 import { WeekNav } from "./components/WeekNav";
 import { Cursors } from "./components/Cursors";
 import { SummaryView } from "./components/SummaryView";
+import { PlansView } from "./components/PlansView";
 import { SettingsModal } from "./components/SettingsModal";
 import { IdentityPicker } from "./components/IdentityPicker";
 import { parseISO } from "./utils/seasons";
@@ -49,6 +50,7 @@ export default function App() {
   const [me, setMe] = useState<AppUser | null>(loadMe);
   const [currentId, setCurrentId] = useState<string>("");
   const [showSummary, setShowSummary] = useState(false);
+  const [showPlans, setShowPlans] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
   // initialize/refresh current week selection
@@ -58,6 +60,30 @@ export default function App() {
       setCurrentId(pickCurrentWeekId(data.weeks));
     }
   }, [data.weeks, currentId]);
+
+  // Auto-create new weeks when "today" has rolled past the last week's end.
+  // Catches up multiple weeks if the app has been closed for a while. Only
+  // runs once per data.weeks change so it doesn't loop forever on hiccups.
+  useEffect(() => {
+    if (!data.weeks.length) return;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    // Walk forward from the last logged week, adding one week at a time until
+    // today falls within (or before the start of) the newest week.
+    let safety = 0;
+    let last = data.weeks[data.weeks.length - 1];
+    while (
+      parseISO(last.endDate).getTime() < today.getTime() &&
+      safety < 60 // up to ~14 months of catch-up; well past any realistic gap
+    ) {
+      const created = addWeekAfterLast(getStore());
+      if (!created) break;
+      last = created;
+      safety++;
+    }
+    // No state update needed — Yjs will fire subscribeAll and re-render.
+    // currentId effect above will reselect "today" if it was outdated.
+  }, [data.weeks]);
 
   // identity → presence
   useEffect(() => {
@@ -172,6 +198,7 @@ export default function App() {
             onSelect={setCurrentId}
             onAddWeek={handleAddWeek}
             onShowSummary={() => setShowSummary(true)}
+            onShowPlans={() => setShowPlans(true)}
             onShowSettings={() => setShowSettings(true)}
           />
         </div>
@@ -218,7 +245,22 @@ export default function App() {
       </main>
 
       {showSummary && (
-        <SummaryView data={data} onClose={() => setShowSummary(false)} />
+        <SummaryView
+          data={data}
+          onClose={() => setShowSummary(false)}
+          onJumpToWeek={(id) => setCurrentId(id)}
+        />
+      )}
+      {showPlans && (
+        <PlansView
+          data={data}
+          me={me}
+          onClose={() => setShowPlans(false)}
+          onJumpToWeek={(id) => {
+            setCurrentId(id);
+            setShowPlans(false);
+          }}
+        />
       )}
       {showSettings && (
         <SettingsModal me={me} onClose={() => setShowSettings(false)} />

@@ -2,12 +2,14 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   buildAppData,
   getCalendarId,
+  getNote,
+  getPlans,
   getStore,
   hydrateSeedIfEmpty,
   listPresence,
   subscribeAll,
 } from "../store/yjs";
-import type { AppData, PresenceState } from "../types";
+import type { AppData, Plan, PresenceState } from "../types";
 import { getCalendarById } from "../calendars";
 import type { Calendar } from "../calendars";
 
@@ -96,6 +98,46 @@ export function usePresence(): PresenceState[] {
     };
   }, []);
   return states;
+}
+
+// Plans: keep a small cached array snapshot so consumers using
+// useSyncExternalStore stay referentially stable until the plans map changes.
+let cachedPlans: Plan[] | null = null;
+function ensurePlans(): Plan[] {
+  if (!cachedPlans) cachedPlans = getPlans(getStore());
+  return cachedPlans;
+}
+
+export function usePlans(): Plan[] {
+  return useSyncExternalStore(
+    (cb) => {
+      const store = getStore();
+      const handler = () => {
+        cachedPlans = getPlans(store);
+        cb();
+      };
+      store.plans.observe(handler);
+      return () => store.plans.unobserve(handler);
+    },
+    ensurePlans,
+    ensurePlans
+  );
+}
+
+/**
+ * Subscribe to a single (week, user) note. Strings are primitive so we can
+ * safely read fresh on every snapshot without breaking referential stability.
+ */
+export function useNote(weekId: string, userId: string): string {
+  const [text, setText] = useState(() => getNote(getStore(), weekId, userId));
+  useEffect(() => {
+    setText(getNote(getStore(), weekId, userId));
+    const store = getStore();
+    const handler = () => setText(getNote(store, weekId, userId));
+    store.notes.observe(handler);
+    return () => store.notes.unobserve(handler);
+  }, [weekId, userId]);
+  return text;
 }
 
 export function useSyncStatus(): "offline" | "connecting" | "connected" | "disconnected" {

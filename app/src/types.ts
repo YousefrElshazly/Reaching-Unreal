@@ -64,3 +64,36 @@ export interface PresenceState {
   color: string;
   cursor: { x: number; y: number } | null;
 }
+
+/** A single tag-target goal inside a Plan. */
+export interface PlanGoal {
+  id: string;
+  /** Free-text tag name; matched case-insensitively to the user's column names. */
+  tag: string;
+  /** Numeric target (hours for hour-columns, days/count for boolean columns). */
+  target: number;
+}
+
+/** A user-assigned plan spanning a contiguous range of weeks. */
+export interface Plan {
+  id: string;
+  name: string;
+  /** Which user this plan belongs to. Matches AppUser.id. */
+  userId: string;
+  /** Week.id of the first week in the range (inclusive). */
+  startWeekId: string;
+  /** Week.id of the last week in the range (inclusive). */
+  endWeekId: string;
+  goals: PlanGoal[];
+  /** Free-form description / notes about the plan as a whole. */
+  notes?: string;
+  /** Unix ms of creation; used for stable sort. */
+  createdAt: number;
+}
+
+/** A note attached to one (week, user) pair. */
+export interface WeekNote {
+  weekId: string;
+  userId: string;
+  text: string;
+}

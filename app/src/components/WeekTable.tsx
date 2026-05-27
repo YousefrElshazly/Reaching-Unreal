@@ -17,6 +17,7 @@ import {
   colorForResult,
   textColorFor,
 } from "../utils/colors";
+import { WeekNotes } from "./WeekNotes";
 
 interface Props {
   week: Week;
@@ -433,6 +434,13 @@ export function WeekTable({ week, table, isOwner }: Props) {
           </tfoot>
         </table>
       </div>
+
+      <WeekNotes
+        weekId={week.id}
+        userId={table.userId}
+        userName={table.userName}
+        canEdit={isOwner}
+      />
     </div>
   );
 }

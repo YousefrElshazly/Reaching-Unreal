@@ -8,6 +8,8 @@ import type {
   AppUser,
   ColumnDef,
   DayRow,
+  Plan,
+  PlanGoal,
   UserTable,
   Week,
 } from "../types";
@@ -49,6 +51,10 @@ export interface Store {
   meta: Y.Map<unknown>;
   structure: Y.Map<unknown>;
   cells: Y.Map<number>;
+  /** key `${weekId}:${userId}` -> note text (string). */
+  notes: Y.Map<string>;
+  /** key planId -> JSON-encoded Plan. */
+  plans: Y.Map<string>;
   /** Reactive connection status for the sync server. */
   status: { value: "offline" | "connecting" | "connected" | "disconnected" };
 }
@@ -83,9 +89,25 @@ export function getStore(): Store {
   const meta = doc.getMap<unknown>("meta");
   const structure = doc.getMap<unknown>("structure");
   const cells = doc.getMap<number>("cells");
+  const notes = doc.getMap<string>("notes");
+  const plans = doc.getMap<string>("plans");
 
-  _store = { doc, provider, awareness, meta, structure, cells, status };
+  _store = {
+    doc,
+    provider,
+    awareness,
+    meta,
+    structure,
+    cells,
+    notes,
+    plans,
+    status,
+  };
   return _store;
+}
+
+export function noteKey(weekId: string, userId: string): string {
+  return `${weekId}:${userId}`;
 }
 
 export function cellKey(
@@ -460,7 +482,7 @@ export function clientId(store: Store): number {
 }
 
 // Useful for snapshot subscriptions: returns a function that fires on any
-// update to either map.
+// update to any of the shared maps.
 export function subscribeAll(
   store: Store,
   cb: () => void
@@ -469,9 +491,130 @@ export function subscribeAll(
   store.meta.observeDeep(handler);
   store.structure.observeDeep(handler);
   store.cells.observe(handler);
+  store.notes.observe(handler);
+  store.plans.observe(handler);
   return () => {
     store.meta.unobserveDeep(handler);
     store.structure.unobserveDeep(handler);
     store.cells.unobserve(handler);
+    store.notes.unobserve(handler);
+    store.plans.unobserve(handler);
   };
+}
+
+// ---------- Notes (per-week-per-user) ----------
+
+export function getNote(store: Store, weekId: string, userId: string): string {
+  return store.notes.get(noteKey(weekId, userId)) ?? "";
+}
+
+export function setNote(
+  store: Store,
+  weekId: string,
+  userId: string,
+  text: string
+): void {
+  const k = noteKey(weekId, userId);
+  if (!text) store.notes.delete(k);
+  else store.notes.set(k, text);
+}
+
+// ---------- Plans ----------
+
+export function getPlans(store: Store): Plan[] {
+  const out: Plan[] = [];
+  store.plans.forEach((raw) => {
+    if (typeof raw !== "string") return;
+    try {
+      out.push(JSON.parse(raw) as Plan);
+    } catch {
+      /* ignore corrupt entry */
+    }
+  });
+  return out.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+export function getPlan(store: Store, planId: string): Plan | null {
+  const raw = store.plans.get(planId);
+  if (typeof raw !== "string") return null;
+  try {
+    return JSON.parse(raw) as Plan;
+  } catch {
+    return null;
+  }
+}
+
+export function upsertPlan(store: Store, plan: Plan): void {
+  store.plans.set(plan.id, JSON.stringify(plan));
+}
+
+export function deletePlan(store: Store, planId: string): void {
+  store.plans.delete(planId);
+}
+
+export function newPlanId(): string {
+  return `plan-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+}
+
+export function newGoalId(): string {
+  return `goal-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 6)}`;
+}
+
+export function updatePlan(
+  store: Store,
+  planId: string,
+  patch: Partial<Plan>
+): Plan | null {
+  const cur = getPlan(store, planId);
+  if (!cur) return null;
+  const next: Plan = { ...cur, ...patch, id: cur.id };
+  upsertPlan(store, next);
+  return next;
+}
+
+export function addGoalToPlan(
+  store: Store,
+  planId: string,
+  goal: Omit<PlanGoal, "id">
+): Plan | null {
+  const cur = getPlan(store, planId);
+  if (!cur) return null;
+  const next: Plan = {
+    ...cur,
+    goals: [...cur.goals, { id: newGoalId(), ...goal }],
+  };
+  upsertPlan(store, next);
+  return next;
+}
+
+export function updateGoal(
+  store: Store,
+  planId: string,
+  goalId: string,
+  patch: Partial<Omit<PlanGoal, "id">>
+): Plan | null {
+  const cur = getPlan(store, planId);
+  if (!cur) return null;
+  const next: Plan = {
+    ...cur,
+    goals: cur.goals.map((g) => (g.id === goalId ? { ...g, ...patch } : g)),
+  };
+  upsertPlan(store, next);
+  return next;
+}
+
+export function removeGoal(
+  store: Store,
+  planId: string,
+  goalId: string
+): Plan | null {
+  const cur = getPlan(store, planId);
+  if (!cur) return null;
+  const next: Plan = { ...cur, goals: cur.goals.filter((g) => g.id !== goalId) };
+  upsertPlan(store, next);
+  return next;
 }

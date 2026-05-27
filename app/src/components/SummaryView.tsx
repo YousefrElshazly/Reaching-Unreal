@@ -18,11 +18,12 @@ import {
 } from "../utils/colors";
 
 type Mode = "month" | "season" | "year";
-type Tab = "trends" | "heatmap";
+type Tab = "trends" | "heatmap" | "year";
 
 interface Props {
   data: AppData;
   onClose: () => void;
+  onJumpToWeek?: (weekId: string) => void;
 }
 
 interface Bucket {
@@ -68,7 +69,7 @@ function bucketsForMode(
   );
 }
 
-export function SummaryView({ data, onClose }: Props) {
+export function SummaryView({ data, onClose, onJumpToWeek }: Props) {
   const [tab, setTab] = useState<Tab>("trends");
   const [mode, setMode] = useState<Mode>("month");
   const [userId, setUserId] = useState<string>(data.users[0]?.id ?? "shazly");
@@ -81,11 +82,11 @@ export function SummaryView({ data, onClose }: Props) {
 
   return (
     <div className="fixed inset-0 z-40 bg-stone-900/40 backdrop-blur-sm flex items-start justify-center overflow-auto py-10 px-4">
-      <div className="bg-white rounded-2xl shadow-xl border border-stone-200 max-w-5xl w-full overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-xl border border-stone-200 max-w-6xl w-full overflow-hidden">
         <div className="flex items-center gap-3 px-6 py-4 border-b border-stone-200 flex-wrap">
           <h2 className="text-lg font-semibold text-stone-800">Summary</h2>
           <div className="flex rounded-md bg-stone-100 p-0.5 text-sm">
-            {(["trends", "heatmap"] as const).map((t) => (
+            {(["trends", "heatmap", "year"] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -100,6 +101,7 @@ export function SummaryView({ data, onClose }: Props) {
             ))}
           </div>
           <div className="ml-auto flex items-center gap-2 flex-wrap">
+            {tab !== "year" && (
             <div className="flex rounded-md bg-stone-100 p-0.5 text-sm">
               {(["month", "season", "year"] as const).map((m) => {
                 const label =
@@ -121,6 +123,7 @@ export function SummaryView({ data, onClose }: Props) {
                 );
               })}
             </div>
+            )}
             <select
               value={userId}
               onChange={(e) => setUserId(e.target.value)}
@@ -142,17 +145,29 @@ export function SummaryView({ data, onClose }: Props) {
         </div>
 
         <div className="p-6">
-          {tab === "trends" ? (
+          {tab === "trends" && (
             <TrendsTab
               buckets={buckets}
               userId={userId}
               calendar={calendar}
             />
-          ) : (
+          )}
+          {tab === "heatmap" && (
             <HeatmapTab
               buckets={buckets}
               userId={userId}
               calendar={calendar}
+            />
+          )}
+          {tab === "year" && (
+            <YearTab
+              data={data}
+              userId={userId}
+              calendar={calendar}
+              onJumpToWeek={(id) => {
+                onJumpToWeek?.(id);
+                onClose();
+              }}
             />
           )}
         </div>
@@ -701,6 +716,235 @@ function HeatmapGrid({
       </div>
       <Legend max={max} flipped={flipped} />
     </div>
+  );
+}
+
+// ---------- Year view ----------
+
+/**
+ * Build the 52(-3) Saturday-anchored week starts that overlap the given year.
+ * The first week's Saturday is the latest Saturday on/before Jan 1; we include
+ * weeks whose start lies inside the year. This always renders at least 52
+ * strips and at most 53.
+ */
+function weekStartsForYear(year: number): Date[] {
+  const jan1 = new Date(year, 0, 1);
+  // Find the Saturday on or before Jan 1 (weeks start on Saturday — see DAYS).
+  const offset = (jan1.getDay() - 6 + 7) % 7; // Saturday = 6
+  const firstSat = new Date(jan1);
+  firstSat.setDate(jan1.getDate() - offset);
+  firstSat.setHours(0, 0, 0, 0);
+  const out: Date[] = [];
+  for (let i = 0; i < 54; i++) {
+    const d = new Date(firstSat);
+    d.setDate(firstSat.getDate() + i * 7);
+    if (d.getFullYear() > year) break;
+    if (d.getFullYear() === year - 1 && i > 0) continue;
+    out.push(d);
+  }
+  return out;
+}
+
+function fmtIso(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+}
+
+function YearTab({
+  data,
+  userId,
+  calendar,
+  onJumpToWeek,
+}: {
+  data: AppData;
+  userId: string;
+  calendar: Calendar;
+  onJumpToWeek: (weekId: string) => void;
+}) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const defaultYear = today.getFullYear();
+  const [year, setYear] = useState(defaultYear);
+
+  // All years that have at least one logged week, plus the current year so the
+  // dropdown is never empty.
+  const years = useMemo(() => {
+    const s = new Set<number>([defaultYear]);
+    for (const w of data.weeks) s.add(parseISO(w.startDate).getFullYear());
+    return Array.from(s).sort((a, b) => b - a);
+  }, [data.weeks, defaultYear]);
+
+  const startsThisYear = useMemo(() => weekStartsForYear(year), [year]);
+
+  const weekByIso = useMemo(() => {
+    const m = new Map<string, Week>();
+    for (const w of data.weeks) m.set(w.startDate, w);
+    return m;
+  }, [data.weeks]);
+
+  const cells = useMemo(() => {
+    return startsThisYear.map((start) => {
+      const iso = fmtIso(start);
+      const logged = weekByIso.get(iso) ?? null;
+      const table = logged?.tables.find((t) => t.userId === userId) ?? null;
+      const days: Array<{ date: Date; iso: string; score: number; hasData: boolean }> = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(start);
+        d.setDate(start.getDate() + i);
+        let score = 0;
+        let hasData = false;
+        if (table) {
+          const row = table.rows.find((r) => r.day === DAYS[i]);
+          if (row) {
+            const sum = Object.values(row.values).reduce((acc, v) => acc + (v || 0), 0);
+            if (sum > 0) hasData = true;
+            score = dayScore(row, table.columns);
+          }
+        }
+        days.push({ date: d, iso: fmtIso(d), score, hasData });
+      }
+      // Identify the current real-world week.
+      const isCurrent = today >= start && today < new Date(start.getTime() + 7 * 86400000);
+      const isFuture = start > today;
+      const label = calendar.labelForWeekStart(start);
+      const weekStatsScore = table ? weekScore(table) : 0;
+      return {
+        start,
+        iso,
+        logged,
+        days,
+        isCurrent,
+        isFuture,
+        label,
+        weekStatsScore,
+      };
+    });
+  }, [startsThisYear, weekByIso, userId, today, calendar]);
+
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3 flex-wrap">
+        <label className="text-xs uppercase tracking-wider text-stone-500">
+          Year
+        </label>
+        <select
+          value={year}
+          onChange={(e) => setYear(Number(e.target.value))}
+          className="px-3 py-1.5 rounded-md border border-stone-200 text-sm bg-white"
+        >
+          {years.map((y) => (
+            <option key={y} value={y}>
+              {y}
+            </option>
+          ))}
+        </select>
+        <span className="text-xs text-stone-400 ml-2">
+          {cells.filter((c) => c.logged).length} of {cells.length} weeks logged
+        </span>
+        <div className="ml-auto flex items-center gap-3 text-[11px] text-stone-500">
+          <LegendDot color="#86efac" label="Current week" outline />
+          <LegendDot color="#a7f3d0" label="Logged day" />
+          <LegendDot color="#f5f5f4" label="No data" />
+        </div>
+      </div>
+
+      <div
+        className="grid gap-2 sm:gap-3"
+        style={{
+          gridTemplateColumns: "repeat(auto-fit, minmax(168px, 1fr))",
+        }}
+      >
+        {cells.map((c, idx) => {
+          const isHovered = hoverIdx === idx;
+          const clickable = !!c.logged;
+          const ring = c.isCurrent
+            ? "ring-2 ring-emerald-400/80 ring-offset-1 ring-offset-white"
+            : isHovered
+            ? "ring-2 ring-stone-300"
+            : "ring-1 ring-stone-200";
+          return (
+            <div
+              key={c.iso}
+              onMouseEnter={() => setHoverIdx(idx)}
+              onMouseLeave={() => setHoverIdx((h) => (h === idx ? null : h))}
+              onClick={() => clickable && onJumpToWeek(c.logged!.id)}
+              className={
+                "rounded-lg bg-white p-2 transition-shadow select-none " +
+                ring +
+                (clickable ? " cursor-pointer hover:bg-stone-50" : " cursor-default opacity-90")
+              }
+              title={`${c.label.display} · ${c.iso}${
+                c.isFuture ? " · future" : ""
+              }${clickable ? " · click to open" : " · no table yet"}`}
+            >
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="text-[10px] uppercase tracking-wider text-stone-500 truncate">
+                  {c.label.short}
+                </div>
+                <div className="text-[10px] text-stone-400 whitespace-nowrap">
+                  {monthName(c.start.getMonth()).slice(0, 3)} {c.start.getDate()}
+                </div>
+              </div>
+              <div className="flex gap-[3px]">
+                {c.days.map((d) => {
+                  const bg = d.hasData ? colorForResult(d.score) : "#f5f5f4";
+                  return (
+                    <div
+                      key={d.iso}
+                      title={`${d.iso}${
+                        d.hasData ? ` · ${Math.round(d.score)}%` : ""
+                      }`}
+                      style={{
+                        width: 18,
+                        height: 18,
+                        background: bg,
+                        borderRadius: 3,
+                        border: "1px solid #e7e5e4",
+                        flex: 1,
+                      }}
+                    />
+                  );
+                })}
+              </div>
+              {c.logged && c.weekStatsScore > 0 && (
+                <div className="mt-1.5 text-[10px] text-stone-500 text-right">
+                  {c.weekStatsScore}%
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function LegendDot({
+  color,
+  label,
+  outline,
+}: {
+  color: string;
+  label: string;
+  outline?: boolean;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span
+        style={{
+          width: 12,
+          height: 12,
+          background: outline ? "transparent" : color,
+          borderRadius: 3,
+          border: outline ? `2px solid ${color}` : "1px solid #e7e5e4",
+          display: "inline-block",
+        }}
+      />
+      {label}
+    </span>
   );
 }
 
