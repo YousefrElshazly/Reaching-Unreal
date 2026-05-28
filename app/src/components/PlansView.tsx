@@ -248,12 +248,19 @@ function PlanList({
           total: computeGoalTotal(range, p.userId, g),
         }));
         const avg = averageSatisfaction(totals);
-        const startLbl = p.startDate
-          ? calendar.labelForWeekStart(parseISO(p.startDate)).short
-          : "?";
-        const endLbl = p.endDate
-          ? calendar.labelForWeekStart(parseISO(p.endDate)).short
-          : "?";
+        const dateRange =
+          p.startDate && p.endDate
+            ? formatRange(
+                parseISO(p.startDate),
+                addDays(parseISO(p.endDate), 6)
+              )
+            : "no range";
+        const calendarHint =
+          p.startDate && p.endDate
+            ? `${calendar.labelForWeekStart(parseISO(p.startDate)).display} → ${
+                calendar.labelForWeekStart(parseISO(p.endDate)).display
+              }`
+            : undefined;
         return (
           <button
             key={p.id}
@@ -271,8 +278,11 @@ function PlanList({
                 <div className="font-semibold text-stone-800 truncate">
                   {p.name || "(untitled plan)"}
                 </div>
-                <div className="text-xs text-stone-500 mt-0.5">
-                  {user?.name ?? "Unknown"} · {startLbl} → {endLbl}
+                <div
+                  className="text-xs text-stone-500 mt-0.5"
+                  title={calendarHint}
+                >
+                  {user?.name ?? "Unknown"} · {dateRange}
                   <span className="text-stone-400 ml-1">
                     ({totalWks} wk
                     {totalWks === 1 ? "" : "s"}
@@ -727,11 +737,16 @@ function PlanDetail({
                 week{totalWks === 1 ? "" : "s"} (
                 {range.length} logged) ·{" "}
                 {plan.startDate && plan.endDate && (
-                  <>
-                    {calendar.labelForWeekStart(parseISO(plan.startDate)).short}
-                    {" → "}
-                    {calendar.labelForWeekStart(parseISO(plan.endDate)).short}
-                  </>
+                  <span
+                    title={`${
+                      calendar.labelForWeekStart(parseISO(plan.startDate)).display
+                    } → ${calendar.labelForWeekStart(parseISO(plan.endDate)).display}`}
+                  >
+                    {formatRange(
+                      parseISO(plan.startDate),
+                      addDays(parseISO(plan.endDate), 6)
+                    )}
+                  </span>
                 )}
               </div>
             </div>
