@@ -68,10 +68,17 @@ export interface PresenceState {
 /** A single tag-target goal inside a Plan. */
 export interface PlanGoal {
   id: string;
-  /** Free-text tag name; matched case-insensitively to the user's column names. */
+  /** Display label for the goal (e.g. "Sports", "Creative"). May be a meta
+   * tag that aggregates several real columns via `sources`, or — when
+   * `sources` is empty — used directly as a case-insensitive column-name
+   * matcher for backward compatibility. */
   tag: string;
   /** Numeric target (hours for hour-columns, days/count for boolean columns). */
   target: number;
+  /** Column names (case-insensitive) whose values feed this goal. Lets one
+   * goal aggregate multiple logged tags, e.g. "Sports" = ["Gym", "Squash"].
+   * When undefined or empty, the goal falls back to matching by `tag`. */
+  sources?: string[];
 }
 
 /** A user-assigned plan spanning a contiguous range of weeks.

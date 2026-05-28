@@ -65,21 +65,34 @@ function snapToSaturday(iso: string): string {
   return fmtIso(d);
 }
 
-/** Sum the values in a user's columns whose name matches `tag`
- * (case-insensitively) across the supplied week slice. */
+/** Resolve which column names a goal pulls from. If the goal has explicit
+ * `sources`, those are it; otherwise we fall back to the goal's tag itself
+ * so legacy goals (tag = column name) keep working. */
+function effectiveSources(goal: PlanGoal): string[] {
+  if (goal.sources && goal.sources.length > 0) return goal.sources;
+  if (goal.tag.trim()) return [goal.tag];
+  return [];
+}
+
+/** Sum the values in a user's columns whose name (case-insensitively)
+ * matches ANY of the supplied source names across the week slice. */
 function computeGoalTotal(
   weeks: Week[],
   userId: string,
-  tag: string
+  goal: PlanGoal
 ): number {
-  const needle = tag.trim().toLowerCase();
-  if (!needle) return 0;
+  const needles = new Set(
+    effectiveSources(goal)
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  if (needles.size === 0) return 0;
   let total = 0;
   for (const w of weeks) {
     const t = w.tables.find((tt) => tt.userId === userId);
     if (!t) continue;
-    const matchingCols = t.columns.filter(
-      (c) => c.name.trim().toLowerCase() === needle
+    const matchingCols = t.columns.filter((c) =>
+      needles.has(c.name.trim().toLowerCase())
     );
     if (matchingCols.length === 0) continue;
     for (const row of t.rows) {
@@ -89,6 +102,25 @@ function computeGoalTotal(
     }
   }
   return Math.round(total * 100) / 100;
+}
+
+/** Every distinct column name that's ever appeared in the given user's
+ * tables, sorted by recent usage (last-seen week first) so the most
+ * relevant chips bubble to the top. */
+function availableSourcesForUser(weeks: Week[], userId: string): string[] {
+  const lastSeen = new Map<string, number>();
+  weeks.forEach((w, idx) => {
+    const t = w.tables.find((tt) => tt.userId === userId);
+    if (!t) return;
+    for (const c of t.columns) {
+      const name = c.name.trim();
+      if (!name) continue;
+      lastSeen.set(name, idx);
+    }
+  });
+  return Array.from(lastSeen.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name]) => name);
 }
 
 export function PlansView({ data, me, onClose, onJumpToWeek }: Props) {
@@ -213,7 +245,7 @@ function PlanList({
         const totalWks = totalWeeksInRange(p.startDate, p.endDate);
         const totals = p.goals.map((g) => ({
           g,
-          total: computeGoalTotal(range, p.userId, g.tag),
+          total: computeGoalTotal(range, p.userId, g),
         }));
         const avg = averageSatisfaction(totals);
         const startLbl = p.startDate
@@ -470,6 +502,123 @@ function addDays(d: Date, n: number): Date {
   return out;
 }
 
+/**
+ * Chip picker for selecting which logged columns ("tags") feed a goal.
+ * Shows every distinct column name the assigned user has used, sorted by
+ * recency. The picker is purely additive — a goal with no sources falls
+ * back to matching its own tag name (handy for one-to-one goals).
+ *
+ * Also supports adding custom names that aren't in the user's tables yet
+ * (e.g. a column that hasn't been created but is planned), via the "+ add"
+ * field on the right.
+ */
+function SourcesPicker({
+  available,
+  selected,
+  onChange,
+  fallbackTag,
+}: {
+  available: string[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+  /** When selected is empty, we say "will match column named …" — preview. */
+  fallbackTag?: string;
+}) {
+  const [customInput, setCustomInput] = useState("");
+  const isSelected = (name: string) =>
+    selected.some((s) => s.toLowerCase() === name.toLowerCase());
+  const toggle = (name: string) => {
+    if (isSelected(name)) {
+      onChange(selected.filter((s) => s.toLowerCase() !== name.toLowerCase()));
+    } else {
+      onChange([...selected, name]);
+    }
+  };
+  const addCustom = () => {
+    const v = customInput.trim();
+    if (!v) return;
+    if (!isSelected(v)) onChange([...selected, v]);
+    setCustomInput("");
+  };
+  // Show available chips merged with selected ones that aren't in available
+  // (custom-typed) so the user can always see + remove them.
+  const extras = selected.filter(
+    (s) => !available.some((a) => a.toLowerCase() === s.toLowerCase())
+  );
+  const allChips = [...available, ...extras];
+
+  return (
+    <div className="text-xs">
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="uppercase tracking-wider text-stone-500">
+          Feeds from
+        </span>
+        {selected.length === 0 ? (
+          <span className="text-stone-400">
+            none —
+            {fallbackTag?.trim() ? (
+              <> auto-matches column <strong>{fallbackTag.trim()}</strong></>
+            ) : (
+              <> pick at least one</>
+            )}
+          </span>
+        ) : (
+          <span className="text-stone-400">
+            {selected.length} source{selected.length === 1 ? "" : "s"}
+          </span>
+        )}
+        {selected.length > 0 && (
+          <button
+            onClick={() => onChange([])}
+            className="ml-auto text-stone-500 hover:text-stone-800 underline"
+          >
+            clear
+          </button>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {allChips.length === 0 && (
+          <span className="text-stone-400 italic">
+            No columns logged yet for this user — type one below.
+          </span>
+        )}
+        {allChips.map((name) => {
+          const on = isSelected(name);
+          return (
+            <button
+              key={name}
+              type="button"
+              onClick={() => toggle(name)}
+              className={
+                "px-2 py-0.5 rounded-full border text-[11px] transition-colors " +
+                (on
+                  ? "bg-stone-900 border-stone-900 text-white"
+                  : "bg-white border-stone-200 text-stone-700 hover:bg-stone-100")
+              }
+            >
+              {name}
+            </button>
+          );
+        })}
+        <span className="ml-1 inline-flex items-center gap-1">
+          <input
+            value={customInput}
+            onChange={(e) => setCustomInput(e.target.value)}
+            placeholder="+ add"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addCustom();
+              }
+            }}
+            className="w-20 px-2 py-0.5 rounded-full border border-dashed border-stone-300 text-[11px] bg-white focus:w-32 transition-[width]"
+          />
+        </span>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Detail ----------
 
 function PlanDetail({
@@ -501,7 +650,7 @@ function PlanDetail({
   const goalRows = useMemo(
     () =>
       plan.goals.map((g) => {
-        const total = computeGoalTotal(range, plan.userId, g.tag);
+        const total = computeGoalTotal(range, plan.userId, g);
         const pct =
           g.target > 0 ? Math.round((total / g.target) * 100) : 0;
         return { g, total, pct };
@@ -513,15 +662,23 @@ function PlanDetail({
 
   const [newTag, setNewTag] = useState("");
   const [newTarget, setNewTarget] = useState<number>(10);
+  const [newSources, setNewSources] = useState<string[]>([]);
+
+  const availableSources = useMemo(
+    () => availableSourcesForUser(data.weeks, plan.userId),
+    [data.weeks, plan.userId]
+  );
 
   const addGoal = () => {
     if (!newTag.trim() || !(newTarget > 0)) return;
     addGoalToPlan(getStore(), plan.id, {
       tag: newTag.trim(),
       target: newTarget,
+      sources: newSources.length > 0 ? newSources : undefined,
     });
     setNewTag("");
     setNewTarget(10);
+    setNewSources([]);
   };
 
   const saveEdit = () => {
@@ -665,8 +822,8 @@ function PlanDetail({
         <h4 className="text-sm font-semibold text-stone-700 mb-2">Goals</h4>
         {goalRows.length === 0 && (
           <div className="text-sm text-stone-400 mb-3">
-            No goals yet. Add a tag (must match a column name in{" "}
-            {user?.name ?? "the user"}'s table, case-insensitive) and a target.
+            No goals yet. Name a goal, set its target, then pick which logged
+            tags feed it (e.g. <em>Sports</em> ← Gym + Squash).
           </div>
         )}
         <div className="rounded-xl border border-stone-200 overflow-hidden">
@@ -677,31 +834,40 @@ function PlanDetail({
               goal={g}
               total={total}
               pct={pct}
+              availableSources={availableSources}
             />
           ))}
-          <div className="flex flex-wrap items-center gap-2 p-3 bg-stone-50 border-t border-stone-200">
-            <input
-              value={newTag}
-              onChange={(e) => setNewTag(e.target.value)}
-              placeholder="Tag (e.g. Studying)"
-              className="flex-1 min-w-[160px] px-3 py-1.5 rounded-md border border-stone-300 text-sm"
-              onKeyDown={(e) => e.key === "Enter" && addGoal()}
+          <div className="p-3 bg-stone-50 border-t border-stone-200 space-y-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                value={newTag}
+                onChange={(e) => setNewTag(e.target.value)}
+                placeholder="Goal name (e.g. Sports)"
+                className="flex-1 min-w-[160px] px-3 py-1.5 rounded-md border border-stone-300 text-sm"
+                onKeyDown={(e) => e.key === "Enter" && addGoal()}
+              />
+              <input
+                type="number"
+                value={newTarget}
+                onChange={(e) => setNewTarget(parseFloat(e.target.value) || 0)}
+                placeholder="Target"
+                className="w-28 px-3 py-1.5 rounded-md border border-stone-300 text-sm"
+                onKeyDown={(e) => e.key === "Enter" && addGoal()}
+              />
+              <button
+                onClick={addGoal}
+                disabled={!newTag.trim() || !(newTarget > 0)}
+                className="px-3 py-1.5 rounded-md bg-stone-900 text-white text-sm font-medium disabled:opacity-50"
+              >
+                + Goal
+              </button>
+            </div>
+            <SourcesPicker
+              available={availableSources}
+              selected={newSources}
+              onChange={setNewSources}
+              fallbackTag={newTag}
             />
-            <input
-              type="number"
-              value={newTarget}
-              onChange={(e) => setNewTarget(parseFloat(e.target.value) || 0)}
-              placeholder="Target"
-              className="w-28 px-3 py-1.5 rounded-md border border-stone-300 text-sm"
-              onKeyDown={(e) => e.key === "Enter" && addGoal()}
-            />
-            <button
-              onClick={addGoal}
-              disabled={!newTag.trim() || !(newTarget > 0)}
-              className="px-3 py-1.5 rounded-md bg-stone-900 text-white text-sm font-medium disabled:opacity-50"
-            >
-              + Goal
-            </button>
           </div>
         </div>
       </section>
@@ -776,20 +942,26 @@ function GoalRow({
   goal,
   total,
   pct,
+  availableSources,
 }: {
   planId: string;
   goal: PlanGoal;
   total: number;
   pct: number;
+  availableSources: string[];
 }) {
   const [editing, setEditing] = useState(false);
   const [draftTag, setDraftTag] = useState(goal.tag);
   const [draftTarget, setDraftTarget] = useState(goal.target);
+  const [draftSources, setDraftSources] = useState<string[]>(
+    goal.sources ?? []
+  );
 
   const save = () => {
     updateGoal(getStore(), planId, goal.id, {
       tag: draftTag.trim(),
       target: draftTarget,
+      sources: draftSources.length > 0 ? draftSources : undefined,
     });
     setEditing(false);
   };
@@ -797,12 +969,14 @@ function GoalRow({
   const cappedPct = Math.min(100, pct);
   const overshoot = pct > 100;
   const barColor = colorForResult(cappedPct);
+  const displaySources = effectiveSources(goal);
+  const isImplicit = !goal.sources || goal.sources.length === 0;
 
   return (
     <div className="px-3 py-2.5 border-b border-stone-200 last:border-b-0">
-      <div className="flex items-center gap-3">
-        {!editing ? (
-          <>
+      {!editing ? (
+        <>
+          <div className="flex items-center gap-3">
             <div className="flex-1 min-w-0">
               <div className="font-medium text-stone-800 truncate">
                 {goal.tag}
@@ -847,19 +1021,44 @@ function GoalRow({
             >
               ×
             </button>
-          </>
-        ) : (
-          <>
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px] text-stone-500">
+            <span className="uppercase tracking-wider text-stone-400">
+              {isImplicit ? "matches" : "feeds from"}
+            </span>
+            {displaySources.length === 0 && (
+              <span className="text-stone-400 italic">— pick sources</span>
+            )}
+            {displaySources.map((s) => (
+              <span
+                key={s}
+                className="px-1.5 py-0.5 rounded border border-stone-200 bg-white text-stone-700"
+              >
+                {s}
+              </span>
+            ))}
+            {isImplicit && displaySources.length > 0 && (
+              <span className="text-stone-400 italic">
+                (auto-matched to column name)
+              </span>
+            )}
+          </div>
+        </>
+      ) : (
+        <div className="space-y-2.5">
+          <div className="flex items-center gap-2 flex-wrap">
             <input
               value={draftTag}
               onChange={(e) => setDraftTag(e.target.value)}
-              className="flex-1 px-2 py-1 rounded border border-stone-300 text-sm"
+              className="flex-1 min-w-[140px] px-2 py-1 rounded border border-stone-300 text-sm"
+              placeholder="Goal name"
             />
             <input
               type="number"
               value={draftTarget}
               onChange={(e) => setDraftTarget(parseFloat(e.target.value) || 0)}
               className="w-24 px-2 py-1 rounded border border-stone-300 text-sm"
+              placeholder="Target"
             />
             <button
               onClick={save}
@@ -872,14 +1071,21 @@ function GoalRow({
                 setEditing(false);
                 setDraftTag(goal.tag);
                 setDraftTarget(goal.target);
+                setDraftSources(goal.sources ?? []);
               }}
               className="px-2.5 py-1 rounded bg-stone-100 text-xs"
             >
               cancel
             </button>
-          </>
-        )}
-      </div>
+          </div>
+          <SourcesPicker
+            available={availableSources}
+            selected={draftSources}
+            onChange={setDraftSources}
+            fallbackTag={draftTag}
+          />
+        </div>
+      )}
     </div>
   );
 }
