@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { CALENDARS } from "../calendars";
-import { setCalendarId, getStore } from "../store/yjs";
+import {
+  setCalendarId,
+  getStore,
+  recoverMissingTables,
+  type RecoveryReport,
+} from "../store/yjs";
 import { useCalendar } from "../hooks/useStore";
 import { labelForWeekStart, parseISO } from "../utils/seasons";
 import {
@@ -22,6 +27,7 @@ export function SettingsModal({ onClose, me }: Props) {
   const [notifStatus, setNotifStatus] = useState<NotificationStatus>("default");
   const [notifBusy, setNotifBusy] = useState(false);
   const [notifError, setNotifError] = useState<string | null>(null);
+  const [recovery, setRecovery] = useState<RecoveryReport | null>(null);
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   useEffect(() => {
@@ -212,6 +218,62 @@ export function SettingsModal({ onClose, me }: Props) {
                   </button>
                 );
               })}
+            </div>
+          </section>
+
+          <section className="border-t border-stone-200 pt-4">
+            <h3 className="text-sm font-semibold text-stone-700 mb-1">
+              Recover missing tables
+            </h3>
+            <p className="text-sm text-stone-500 mb-3">
+              Earlier versions had a sync bug that could drop a user's table
+              from a week when two devices edited at the same time. The cell
+              values are still safe in storage — this rebuilds the table
+              around them using your most recent column layout as a template.
+              Safe to run any time; existing tables are never touched.
+            </p>
+            <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+              <button
+                onClick={() => setRecovery(recoverMissingTables(getStore()))}
+                className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-sm"
+              >
+                Scan & restore
+              </button>
+              {recovery && (
+                <div className="mt-3 text-sm">
+                  {recovery.restored.length === 0 &&
+                  recovery.unrecoverable.length === 0 ? (
+                    <div className="text-stone-600">
+                      No missing tables found. Everything looks consistent.
+                    </div>
+                  ) : (
+                    <>
+                      {recovery.restored.length > 0 && (
+                        <div className="text-emerald-700">
+                          Restored {recovery.restored.length} table
+                          {recovery.restored.length === 1 ? "" : "s"}:
+                          <ul className="mt-1 ml-4 list-disc text-stone-600 text-xs space-y-0.5 max-h-40 overflow-auto">
+                            {recovery.restored.map((r) => (
+                              <li key={`${r.weekId}:${r.userId}`}>
+                                <code>{r.userId}</code> · week of{" "}
+                                {r.weekStartDate} · {r.columns} column
+                                {r.columns === 1 ? "" : "s"}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {recovery.unrecoverable.length > 0 && (
+                        <div className="mt-2 text-amber-700">
+                          {recovery.unrecoverable.length} pair
+                          {recovery.unrecoverable.length === 1 ? "" : "s"} had
+                          no recoverable cell data.
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           </section>
 
