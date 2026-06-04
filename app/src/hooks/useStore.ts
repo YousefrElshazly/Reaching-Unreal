@@ -56,13 +56,20 @@ export function useCalendar(): Calendar {
 export function useEnsureSeeded(): boolean {
   const [ready, setReady] = useState(false);
   useEffect(() => {
+    let cancelled = false;
     const store = getStore();
-    // Wait one tick so y-indexeddb can hydrate before we decide to seed.
-    const t = setTimeout(() => {
+    // Wait for IndexedDB + the websocket's first sync (with a timeout) before
+    // we decide whether to seed/migrate. Seeding or auto-creating weeks
+    // against a half-loaded doc is exactly what previously caused devices to
+    // overwrite each other's tables.
+    store.whenReady.then(() => {
+      if (cancelled) return;
       hydrateSeedIfEmpty(store);
       setReady(true);
-    }, 250);
-    return () => clearTimeout(t);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
   return ready;
 }

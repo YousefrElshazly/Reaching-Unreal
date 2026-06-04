@@ -3,6 +3,7 @@ import type { ColumnDef, UserTable, Week } from "../types";
 import { DAYS } from "../types";
 import {
   addColumn,
+  columnId,
   deleteColumn,
   deleteUserTableFromWeek,
   getStore,
@@ -25,11 +26,6 @@ interface Props {
   isOwner: boolean;
 }
 
-function newColumnId(weekId: string, userId: string, name: string): string {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 24);
-  return `${userId}-${weekId}-${Date.now().toString(36)}-${slug}`;
-}
-
 export function WeekTable({ week, table, isOwner }: Props) {
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
@@ -41,7 +37,7 @@ export function WeekTable({ week, table, isOwner }: Props) {
   const handleAdd = () => {
     if (!newName.trim()) return;
     const col: ColumnDef = {
-      id: newColumnId(week.id, table.userId, newName),
+      id: columnId(week.id, table.userId, newName, table.columns),
       name: newName.trim(),
       type: newType,
       weight: newWeight,

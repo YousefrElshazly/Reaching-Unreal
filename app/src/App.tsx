@@ -62,9 +62,11 @@ export default function App() {
   }, [data.weeks, currentId]);
 
   // Auto-create new weeks when "today" has rolled past the last week's end.
-  // Catches up multiple weeks if the app has been closed for a while. Only
-  // runs once per data.weeks change so it doesn't loop forever on hiccups.
+  // Catches up multiple weeks if the app has been closed for a while. Gated on
+  // `seeded` so it never runs against a half-synced doc (which used to make two
+  // devices race and clobber each other's tables).
   useEffect(() => {
+    if (!seeded) return;
     if (!data.weeks.length) return;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -83,7 +85,7 @@ export default function App() {
     }
     // No state update needed — Yjs will fire subscribeAll and re-render.
     // currentId effect above will reselect "today" if it was outdated.
-  }, [data.weeks]);
+  }, [data.weeks, seeded]);
 
   // identity → presence
   useEffect(() => {

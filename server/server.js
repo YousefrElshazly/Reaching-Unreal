@@ -336,17 +336,54 @@ function isValidTimezone(tz) {
  * IANA timezone. The lookup uses the live in-memory Y.Doc so server-side
  * checks always see the latest synced state from any device.
  */
+/**
+ * Build the week list (with tables/columns) from a doc, preferring the v2
+ * granular maps (weekMeta + userTables) and falling back to the legacy
+ * monolithic `structure.json` for older docs. Cell values are not needed
+ * here — only the column definitions.
+ */
+function buildWeeksFromDoc(doc) {
+  const weekMeta = doc.getMap("weekMeta");
+  const userTables = doc.getMap("userTables");
+  if (weekMeta.size > 0) {
+    const rows = [];
+    weekMeta.forEach((raw) => {
+      if (typeof raw !== "string") return;
+      try {
+        rows.push(JSON.parse(raw));
+      } catch {
+        /* skip */
+      }
+    });
+    rows.sort((a, b) => String(a.startDate).localeCompare(String(b.startDate)));
+    return rows.map((m) => {
+      const tables = [];
+      userTables.forEach((raw, k) => {
+        if (!k.startsWith(`${m.id}:`) || typeof raw !== "string") return;
+        try {
+          tables.push(JSON.parse(raw));
+        } catch {
+          /* skip */
+        }
+      });
+      return { ...m, tables };
+    });
+  }
+  // Legacy fallback
+  const structureRaw = doc.getMap("structure").get("json");
+  if (typeof structureRaw !== "string") return [];
+  try {
+    const weeks = JSON.parse(structureRaw);
+    return Array.isArray(weeks) ? weeks : [];
+  } catch {
+    return [];
+  }
+}
+
 function isTodayZeroForUser(roomName, userId, timezone) {
   const room = rooms.get(roomName);
   if (!room) return false; // can't decide → don't spam
-  const structureRaw = room.doc.getMap("structure").get("json");
-  if (typeof structureRaw !== "string") return false;
-  let weeks;
-  try {
-    weeks = JSON.parse(structureRaw);
-  } catch {
-    return false;
-  }
+  const weeks = buildWeeksFromDoc(room.doc);
   if (!Array.isArray(weeks) || weeks.length === 0) return false;
 
   // Find the week whose Saturday-anchored window contains "today" in the user's

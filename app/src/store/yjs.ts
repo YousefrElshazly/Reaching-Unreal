@@ -70,6 +70,7 @@ export interface WeekMetaRow {
 export interface Store {
   doc: Y.Doc;
   provider: WebsocketProvider | null;
+  idb: IndexeddbPersistence;
   awareness: Awareness;
   meta: Y.Map<unknown>;
   /** Legacy monolithic structure — only used as a migration source. */
@@ -82,14 +83,27 @@ export interface Store {
   notes: Y.Map<string>;
   plans: Y.Map<string>;
   status: { value: "offline" | "connecting" | "connected" | "disconnected" };
+  /**
+   * Resolves once it's safe to make structural writes: local IndexedDB has
+   * fully hydrated AND (the websocket has completed its initial sync OR we've
+   * waited long enough that we won't block the UI on a cold server). This is
+   * the guard that prevents the old "write to a half-loaded doc" corruption.
+   */
+  whenReady: Promise<void>;
 }
 
 let _store: Store | null = null;
 
+// How long to wait for the websocket's first sync before proceeding with the
+// locally-hydrated doc anyway. Render free tier can cold-start for 30-50s; we
+// don't want to block seeding/auto-week that long, and for a returning user
+// IndexedDB already holds the full doc, so proceeding is safe.
+const WS_SYNC_TIMEOUT_MS = 12_000;
+
 export function getStore(): Store {
   if (_store) return _store;
   const doc = new Y.Doc();
-  new IndexeddbPersistence(ROOM, doc);
+  const idb = new IndexeddbPersistence(ROOM, doc);
 
   const status: Store["status"] = { value: SYNC_URL ? "connecting" : "offline" };
   let provider: WebsocketProvider | null = null;
@@ -106,6 +120,28 @@ export function getStore(): Store {
     }
   }
 
+  // Build the readiness promise: wait for IndexedDB, then (best-effort) the
+  // first websocket sync, with a hard timeout so we never hang the app.
+  const idbReady = new Promise<void>((resolve) => {
+    if (idb.synced) resolve();
+    else idb.once("synced", () => resolve());
+  });
+  const wsReady = new Promise<void>((resolve) => {
+    if (!provider) return resolve();
+    if (provider.synced) return resolve();
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    provider.once("sync", (isSynced: boolean) => {
+      if (isSynced) finish();
+    });
+    setTimeout(finish, WS_SYNC_TIMEOUT_MS);
+  });
+  const whenReady = idbReady.then(() => wsReady);
+
   const awareness = provider?.awareness ?? new Awareness(doc);
   const meta = doc.getMap<unknown>("meta");
   const structure = doc.getMap<unknown>("structure");
@@ -118,6 +154,7 @@ export function getStore(): Store {
   _store = {
     doc,
     provider,
+    idb,
     awareness,
     meta,
     structure,
@@ -127,6 +164,7 @@ export function getStore(): Store {
     notes,
     plans,
     status,
+    whenReady,
   };
   return _store;
 }
@@ -148,6 +186,38 @@ export function cellKey(
   columnId: string
 ): string {
   return `${weekId}:${userId}:${day}:${columnId}`;
+}
+
+/** Stable slug used for deterministic column IDs. */
+export function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 32);
+}
+
+/**
+ * Deterministic, collision-safe column ID. The same column name in the same
+ * (week, user) always maps to the same ID across devices — which is what
+ * stops the duplicate-column fragmentation we used to get from
+ * `Date.now()`-based IDs (two devices adding "Gym" produced two different
+ * columns that never merged). If a *different* column already occupies the
+ * base slug locally, a numeric suffix is appended so genuine duplicates are
+ * still allowed.
+ */
+export function columnId(
+  weekId: string,
+  userId: string,
+  name: string,
+  existing: { id: string }[] = []
+): string {
+  const slug = slugify(name) || "col";
+  const base = `${userId}-${weekId}-${slug}`;
+  if (!existing.some((c) => c.id === base)) return base;
+  let n = 2;
+  while (existing.some((c) => c.id === `${base}-${n}`)) n++;
+  return `${base}-${n}`;
 }
 
 // ---------- Granular read/write helpers ----------
@@ -433,15 +503,25 @@ function fmtISO(d: Date): string {
   ).padStart(2, "0")}`;
 }
 
-function regenColumnIdsFor(weekId: string, table: UserTable): UserTable {
+/**
+ * Clone a table into a new week: deterministic per-(week,user,slug) IDs and
+ * de-duplicated columns. Because IDs are derived purely from the name, two
+ * devices cloning the same source week compute identical IDs and converge
+ * instead of fragmenting. Duplicate source slugs collapse into one column.
+ */
+function cloneTableForWeek(weekId: string, table: UserTable): UserTable {
+  const columns: ColumnDef[] = [];
+  const seen = new Set<string>();
+  for (const c of table.columns) {
+    const slug = slugify(c.name) || "col";
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    columns.push({ ...c, id: `${table.userId}-${weekId}-${slug}` });
+  }
   return {
-    ...table,
-    columns: table.columns.map((c, idx) => ({
-      ...c,
-      id: `${table.userId}-${weekId}-${idx}-${c.name
-        .toLowerCase()
-        .replace(/\s+/g, "_")}`,
-    })),
+    userId: table.userId,
+    userName: table.userName,
+    columns,
     rows: DAYS.map((day) => ({ day, values: {} })),
   };
 }
@@ -496,7 +576,7 @@ export function addWeekAfterLast(store: Store): Week | null {
   store.doc.transact(() => {
     writeWeekMeta(store, meta);
     for (const t of lastTables) {
-      writeUserTable(store, id, regenColumnIdsFor(id, t));
+      writeUserTable(store, id, cloneTableForWeek(id, t));
     }
   }, "addWeekAfterLast");
 
@@ -561,9 +641,11 @@ export function hydrateSeedIfEmpty(store: Store): void {
     }
   }, "hydrate-and-migrate");
 
-  // Recovery runs outside the transact so console logging shows after the
-  // initial write batch.
-  recoverMissingTables(store);
+  // NOTE: We deliberately do NOT auto-run table recovery here. Recovery
+  // reconstructs columns/values and must only run against a fully-synced doc,
+  // under explicit user control (Settings → "Scan & restore"). Running it
+  // automatically on every load — especially before sync completed — is what
+  // corrupted data previously.
 }
 
 /** Copy the legacy monolithic structure into the granular v2 maps. */
