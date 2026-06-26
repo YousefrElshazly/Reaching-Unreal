@@ -5,9 +5,12 @@ import {
   getNote,
   getPlans,
   getStore,
+  getSyncState,
   hydrateSeedIfEmpty,
   listPresence,
+  setupSyncLifecycle,
   subscribeAll,
+  type SyncState,
 } from "../store/yjs";
 import type { AppData, Plan, PresenceState } from "../types";
 import { getCalendarById } from "../calendars";
@@ -57,18 +60,17 @@ export function useEnsureSeeded(): boolean {
   const [ready, setReady] = useState(false);
   useEffect(() => {
     let cancelled = false;
+    let stopLifecycle: (() => void) | undefined;
     const store = getStore();
-    // Wait for IndexedDB + the websocket's first sync (with a timeout) before
-    // we decide whether to seed/migrate. Seeding or auto-creating weeks
-    // against a half-loaded doc is exactly what previously caused devices to
-    // overwrite each other's tables.
     store.whenReady.then(() => {
       if (cancelled) return;
       hydrateSeedIfEmpty(store);
+      stopLifecycle = setupSyncLifecycle(store);
       setReady(true);
     });
     return () => {
       cancelled = true;
+      stopLifecycle?.();
     };
   }, []);
   return ready;
@@ -147,22 +149,21 @@ export function useNote(weekId: string, userId: string): string {
   return text;
 }
 
-export function useSyncStatus(): "offline" | "connecting" | "connected" | "disconnected" {
-  const [s, setS] = useState<"offline" | "connecting" | "connected" | "disconnected">(
-    () => getStore().status.value
-  );
+export function useSyncStatus(): SyncState {
+  const [s, setS] = useState<SyncState>(() => getSyncState(getStore()));
   useEffect(() => {
     const store = getStore();
-    setS(store.status.value);
+    const refresh = () => setS(getSyncState(store));
+    refresh();
     const provider = store.provider;
     if (!provider) return;
-    const handler = (e: { status: string }) => {
-      const next = (e.status as typeof s) ?? "disconnected";
-      setS(next);
-    };
-    provider.on("status", handler);
+    const onStatus = () => refresh();
+    const onSync = () => refresh();
+    provider.on("status", onStatus);
+    provider.on("sync", onSync);
     return () => {
-      provider.off("status", handler);
+      provider.off("status", onStatus);
+      provider.off("sync", onSync);
     };
   }, []);
   return s;

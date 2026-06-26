@@ -7,7 +7,7 @@
 //     still opens when not.
 //   - For other GETs, stale-while-revalidate.
 
-const VERSION = "ru-v10";
+const VERSION = "ru-v13";
 const SHELL = ["/", "/index.html", "/manifest.webmanifest", "/favicon.svg"];
 
 self.addEventListener("install", (e) => {
@@ -74,6 +74,24 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(req.url);
   if (url.protocol === "ws:" || url.protocol === "wss:") return;
   if (url.origin !== self.location.origin) return;
+
+  // Always fetch JS/CSS from the network first so deploys land immediately.
+  // Stale cached bundles were a root cause of devices running without a sync
+  // URL (or an old buggy build) and silently keeping edits local-only.
+  if (url.pathname.startsWith("/assets/") && /\.(js|css)$/i.test(url.pathname)) {
+    e.respondWith(
+      fetch(req)
+        .then((res) => {
+          if (res && res.status === 200) {
+            const copy = res.clone();
+            caches.open(VERSION).then((c) => c.put(req, copy));
+          }
+          return res;
+        })
+        .catch(() => caches.match(req))
+    );
+    return;
+  }
 
   if (req.mode === "navigate") {
     e.respondWith(

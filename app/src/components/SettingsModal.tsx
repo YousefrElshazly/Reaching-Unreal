@@ -3,10 +3,15 @@ import { CALENDARS } from "../calendars";
 import {
   setCalendarId,
   getStore,
+  forceReconnect,
   recoverMissingTables,
+  getConfiguredRoom,
+  getConfiguredSyncUrl,
+  importLocalOfflineRooms,
+  type LocalImportReport,
   type RecoveryReport,
 } from "../store/yjs";
-import { useCalendar } from "../hooks/useStore";
+import { useCalendar, useSyncStatus } from "../hooks/useStore";
 import { labelForWeekStart, parseISO } from "../utils/seasons";
 import {
   getNotificationStatus,
@@ -24,10 +29,14 @@ interface Props {
 
 export function SettingsModal({ onClose, me }: Props) {
   const cal = useCalendar();
+  const syncStatus = useSyncStatus();
   const [notifStatus, setNotifStatus] = useState<NotificationStatus>("default");
   const [notifBusy, setNotifBusy] = useState(false);
   const [notifError, setNotifError] = useState<string | null>(null);
   const [recovery, setRecovery] = useState<RecoveryReport | null>(null);
+  const [localImport, setLocalImport] = useState<LocalImportReport | null>(null);
+  const [syncRepairBusy, setSyncRepairBusy] = useState(false);
+  const [syncRepairError, setSyncRepairError] = useState<string | null>(null);
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   useEffect(() => {
@@ -79,6 +88,23 @@ export function SettingsModal({ onClose, me }: Props) {
     "2026-06-13",
   ];
 
+  const handleForceReconnect = () => {
+    forceReconnect(getStore());
+  };
+
+  const handleImportLocal = async () => {
+    setSyncRepairBusy(true);
+    setSyncRepairError(null);
+    try {
+      const report = await importLocalOfflineRooms(getStore());
+      setLocalImport(report);
+    } catch (e) {
+      setSyncRepairError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSyncRepairBusy(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-40 bg-stone-900/40 backdrop-blur-sm flex items-start justify-center overflow-auto py-10 px-4">
       <div className="bg-white rounded-2xl shadow-xl border border-stone-200 max-w-2xl w-full overflow-hidden">
@@ -93,6 +119,73 @@ export function SettingsModal({ onClose, me }: Props) {
         </div>
 
         <div className="p-6 space-y-6">
+          <section>
+            <h3 className="text-sm font-semibold text-stone-700 mb-1">
+              Sync status
+            </h3>
+            <p className="text-sm text-stone-500 mb-3">
+              All devices must show <strong>Live sync</strong> for edits to
+              appear everywhere. If you see “Offline” or “Syncing…”, keep the app
+              open until it turns green.
+            </p>
+            <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm space-y-1 font-mono text-stone-700">
+              <div>
+                Status:{" "}
+                <span className="font-semibold text-stone-900">{syncStatus}</span>
+              </div>
+              <div>Room: {getConfiguredRoom() || "(default)"}</div>
+              <div className="break-all">
+                Server: {getConfiguredSyncUrl() || "(not configured — local only)"}
+              </div>
+              <div>Yjs merged: {getStore().provider?.synced ? "yes" : "no"}</div>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                onClick={handleForceReconnect}
+                className="px-3 py-1.5 rounded-md bg-stone-200 hover:bg-stone-300 text-sm"
+              >
+                Force reconnect
+              </button>
+              <button
+                onClick={handleImportLocal}
+                disabled={syncRepairBusy}
+                className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-sm disabled:opacity-50"
+              >
+                {syncRepairBusy ? "Scanning…" : "Import local offline logs"}
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-stone-500">
+              Use “Import local offline logs” on the device that still shows
+              missing entries locally. It scans older local rooms on this device
+              and uploads any positive cells into the shared room.
+            </p>
+            {syncRepairError && (
+              <div className="mt-2 text-xs text-rose-600">{syncRepairError}</div>
+            )}
+            {localImport && (
+              <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+                Imported {localImport.totalCells} cell
+                {localImport.totalCells === 1 ? "" : "s"}, {localImport.totalTables} table
+                {localImport.totalTables === 1 ? "" : "s"}, and reconciled{" "}
+                {localImport.reconciled} old key
+                {localImport.reconciled === 1 ? "" : "s"}.
+                {localImport.rooms.length > 0 ? (
+                  <ul className="mt-1 ml-4 list-disc text-xs text-emerald-800">
+                    {localImport.rooms.map((r) => (
+                      <li key={r.room}>
+                        {r.room}: {r.cells} cells, {r.tables} tables, {r.weeks} weeks
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="mt-1 text-xs">
+                    No older local-room data was found on this device.
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
           <section>
             <h3 className="text-sm font-semibold text-stone-700 mb-1">
               Daily reminder

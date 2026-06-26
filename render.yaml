@@ -24,3 +24,10 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
+      # Durable cross-restart storage (Upstash Redis REST). Set these in the
+      # Render dashboard from your Upstash database's REST API page. Without
+      # them the server falls back to ephemeral /tmp and only relays live.
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false

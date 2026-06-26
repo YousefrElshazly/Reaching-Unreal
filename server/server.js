@@ -12,6 +12,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 import { WebSocketServer } from "ws";
 import webpush from "web-push";
 import * as Y from "yjs";
@@ -72,6 +73,64 @@ try {
   persistEnabled = false;
 }
 
+// --- Durable snapshot store (Upstash Redis REST) ----------------------------
+// Render's free tier wipes the container (and /tmp) on every spin-down, so the
+// local snapshot above is effectively lost between sessions. That made the
+// server a live-only relay: data logged on one device wasn't visible on
+// another unless both were online at the same time. Snapshotting each room's
+// Yjs state to Upstash (a free, always-on Redis) gives us true durability
+// across restarts. Disabled gracefully when the env vars aren't set.
+const UPSTASH_URL = (process.env.UPSTASH_REDIS_REST_URL || "").replace(/\/+$/, "");
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
+const REMOTE_KEY_PREFIX = process.env.UPSTASH_KEY_PREFIX || "ru:doc:";
+const remoteEnabled = !!(UPSTASH_URL && UPSTASH_TOKEN);
+
+if (remoteEnabled) {
+  console.log("[remote] Upstash durable snapshots enabled");
+} else {
+  console.warn(
+    "[remote] UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN not set — " +
+      "durable cross-restart persistence disabled (relying on ephemeral /tmp only)."
+  );
+}
+
+async function redisCommand(args) {
+  const res = await fetch(UPSTASH_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${UPSTASH_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) {
+    throw new Error(`upstash ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+/** Load a room's Yjs update from Upstash. Returns Uint8Array | null. */
+async function remoteLoad(roomFile) {
+  if (!remoteEnabled) return null;
+  const { result } = await redisCommand(["GET", REMOTE_KEY_PREFIX + roomFile]);
+  if (!result || typeof result !== "string") return null;
+  // Stored as "gz:" + base64(gzip(update)). Tolerate a plain base64 value too.
+  if (result.startsWith("gz:")) {
+    return new Uint8Array(
+      zlib.gunzipSync(Buffer.from(result.slice(3), "base64"))
+    );
+  }
+  return new Uint8Array(Buffer.from(result, "base64"));
+}
+
+/** Save a room's Yjs update to Upstash (gzip + base64). */
+async function remoteSave(roomFile, update) {
+  if (!remoteEnabled) return;
+  const gz = zlib.gzipSync(Buffer.from(update));
+  const val = "gz:" + gz.toString("base64");
+  await redisCommand(["SET", REMOTE_KEY_PREFIX + roomFile, val]);
+}
+
 // --- Per-room state ----------------------------------------------------------
 
 const MESSAGE_SYNC = 0;
@@ -85,20 +144,7 @@ class Room {
     this.awareness.setLocalState(null); // server isn't a participant
     this.conns = new Map(); // ws -> Set<clientID>
     this.dirty = false;
-
-    // Restore from disk if we have a snapshot
-    if (persistEnabled) {
-      const snap = path.join(DATA_DIR, `${this.safeFile()}.bin`);
-      try {
-        if (fs.existsSync(snap)) {
-          const buf = fs.readFileSync(snap);
-          Y.applyUpdate(this.doc, new Uint8Array(buf));
-          console.log(`[room ${name}] restored ${buf.length} bytes from disk`);
-        }
-      } catch (e) {
-        console.warn(`[room ${name}] restore failed:`, e?.message ?? e);
-      }
-    }
+    this.savingRemote = false;
 
     this.doc.on("update", (update, origin) => {
       this.dirty = true;
@@ -126,21 +172,104 @@ class Room {
         sendBinary(ws, msg);
       }
     });
+
+    // Restore prior state before we accept connections. Resolves this.ready.
+    this.ready = this.restore();
   }
 
   safeFile() {
     return this.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, MAX_ROOM_NAME_LEN);
   }
 
-  persist() {
-    if (!this.dirty || !persistEnabled) return;
+  /**
+   * Load prior state, preferring the durable Upstash snapshot and falling back
+   * to the (ephemeral) local /tmp snapshot. applyUpdate marks the doc dirty,
+   * which is fine: it just means the first persist tick re-pushes the snapshot
+   * (e.g. to seed Upstash from a local file on first run).
+   */
+  async restore() {
+    if (remoteEnabled) {
+      try {
+        const update = await remoteLoad(this.safeFile());
+        if (update && update.length) {
+          Y.applyUpdate(this.doc, update, "restore");
+          this.dirty = false;
+          console.log(
+            `[room ${this.name}] restored ${update.length} bytes from Upstash`
+          );
+          return;
+        }
+      } catch (e) {
+        console.warn(
+          `[room ${this.name}] remote restore failed:`,
+          e?.message ?? e
+        );
+      }
+    }
+    if (persistEnabled) {
+      const snap = path.join(DATA_DIR, `${this.safeFile()}.bin`);
+      try {
+        if (fs.existsSync(snap)) {
+          const buf = fs.readFileSync(snap);
+          Y.applyUpdate(this.doc, new Uint8Array(buf), "restore");
+          console.log(
+            `[room ${this.name}] restored ${buf.length} bytes from disk`
+          );
+        }
+      } catch (e) {
+        console.warn(`[room ${this.name}] disk restore failed:`, e?.message ?? e);
+      }
+    }
+  }
+
+  /** Debounced, dirty-gated persistence to Upstash (durable) + /tmp (cache). */
+  async persist() {
+    if (!this.dirty || this.savingRemote) return;
+    this.savingRemote = true;
     const update = Y.encodeStateAsUpdate(this.doc);
-    const file = path.join(DATA_DIR, `${this.safeFile()}.bin`);
-    try {
-      fs.writeFileSync(file, Buffer.from(update));
-      this.dirty = false;
-    } catch (e) {
-      console.warn(`[room ${this.name}] persist failed:`, e?.message ?? e);
+    let ok = false;
+    if (remoteEnabled) {
+      try {
+        await remoteSave(this.safeFile(), update);
+        ok = true;
+      } catch (e) {
+        console.warn(`[room ${this.name}] remote persist failed:`, e?.message ?? e);
+      }
+    }
+    if (persistEnabled) {
+      try {
+        fs.writeFileSync(
+          path.join(DATA_DIR, `${this.safeFile()}.bin`),
+          Buffer.from(update)
+        );
+        ok = true;
+      } catch (e) {
+        console.warn(`[room ${this.name}] disk persist failed:`, e?.message ?? e);
+      }
+    }
+    if (ok) this.dirty = false;
+    this.savingRemote = false;
+  }
+
+  /** Unconditional final flush (used on shutdown). */
+  async flush() {
+    const update = Y.encodeStateAsUpdate(this.doc);
+    if (remoteEnabled) {
+      try {
+        await remoteSave(this.safeFile(), update);
+      } catch (e) {
+        console.warn(`[room ${this.name}] remote flush failed:`, e?.message ?? e);
+      }
+    }
+    if (persistEnabled) {
+      try {
+        fs.writeFileSync(
+          path.join(DATA_DIR, `${this.safeFile()}.bin`),
+          Buffer.from(update)
+        );
+      } catch {
+        /* best effort */
+      }
     }
   }
 
@@ -625,8 +754,13 @@ server.on("upgrade", (req, socket, head) => {
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     const room = getRoom(roomName);
-    room.addConn(ws);
     ws.binaryType = "arraybuffer";
+
+    // Buffer any messages that arrive before the room finishes restoring its
+    // durable snapshot, so a client's initial sync is handled against the
+    // restored doc (not an empty one).
+    let attached = false;
+    const pending = [];
     ws.on("message", (data) => {
       const buf =
         data instanceof ArrayBuffer
@@ -634,7 +768,15 @@ server.on("upgrade", (req, socket, head) => {
           : Buffer.isBuffer(data)
           ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
           : new Uint8Array(data);
-      room.handleMessage(ws, buf);
+      if (attached) room.handleMessage(ws, buf);
+      else pending.push(buf);
+    });
+    room.ready.finally(() => {
+      if (ws.readyState !== ws.OPEN) return;
+      room.addConn(ws);
+      attached = true;
+      for (const buf of pending) room.handleMessage(ws, buf);
+      pending.length = 0;
     });
     const pinger = setInterval(() => {
       if (ws.readyState !== ws.OPEN) {
@@ -661,10 +803,22 @@ setInterval(() => {
   for (const room of rooms.values()) room.persist();
 }, PERSIST_INTERVAL_MS);
 
-const shutdown = () => {
-  console.log("shutting down, persisting rooms...");
-  for (const room of rooms.values()) room.persist();
+let shuttingDown = false;
+const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log("shutting down, flushing rooms...");
+  try {
+    await Promise.race([
+      Promise.all(Array.from(rooms.values()).map((room) => room.flush())),
+      new Promise((res) => setTimeout(res, 8000)),
+    ]);
+  } catch (e) {
+    console.warn("[shutdown] flush error:", e?.message ?? e);
+  }
   server.close(() => process.exit(0));
+  // Safety net if server.close hangs on open sockets.
+  setTimeout(() => process.exit(0), 2000).unref();
 };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

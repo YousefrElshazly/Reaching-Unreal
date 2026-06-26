@@ -98,7 +98,37 @@ let _store: Store | null = null;
 // locally-hydrated doc anyway. Render free tier can cold-start for 30-50s; we
 // don't want to block seeding/auto-week that long, and for a returning user
 // IndexedDB already holds the full doc, so proceeding is safe.
-const WS_SYNC_TIMEOUT_MS = 12_000;
+const WS_SYNC_TIMEOUT_MS = 45_000;
+/** Re-request server state periodically (helps iOS after backgrounding). */
+const WS_RESYNC_INTERVAL_MS = 30_000;
+
+/** True sync state — websocket "connected" ≠ Yjs merged with server. */
+export type SyncState =
+  | "offline"
+  | "connecting"
+  | "syncing"
+  | "synced"
+  | "disconnected";
+
+export function getConfiguredRoom(): string {
+  return ROOM;
+}
+
+export function getConfiguredSyncUrl(): string {
+  return SYNC_URL;
+}
+
+export function getSyncState(store: Store): SyncState {
+  if (!SYNC_URL || !store.provider) return "offline";
+  const p = store.provider;
+  if (p.wsconnected) return p.synced ? "synced" : "syncing";
+  return p.wsconnecting ? "connecting" : "disconnected";
+}
+
+/** Whether edits will reach other devices right now. */
+export function isLiveSynced(store: Store): boolean {
+  return getSyncState(store) === "synced";
+}
 
 export function getStore(): Store {
   if (_store) return _store;
@@ -110,7 +140,18 @@ export function getStore(): Store {
 
   if (SYNC_URL) {
     try {
-      provider = new WebsocketProvider(SYNC_URL, ROOM, doc, { connect: true });
+      provider = new WebsocketProvider(SYNC_URL, ROOM, doc, {
+        // Critical: connect only after IndexedDB has hydrated below. If a
+        // phone has unsynced local cells, connecting to the server first can
+        // merge remote deletions/older structure before the local update is in
+        // memory. Loading local first means the first websocket sync advertises
+        // the complete local state and uploads it.
+        connect: false,
+        // Periodically re-pull server state — critical on iPhone after the OS
+        // kills the websocket while the PWA was in the background.
+        resyncInterval: WS_RESYNC_INTERVAL_MS,
+        maxBackoffTime: 10_000,
+      });
       provider.on("status", (e: { status: string }) => {
         status.value = (e.status as Store["status"]["value"]) ?? "disconnected";
       });
@@ -140,7 +181,10 @@ export function getStore(): Store {
     });
     setTimeout(finish, WS_SYNC_TIMEOUT_MS);
   });
-  const whenReady = idbReady.then(() => wsReady);
+  const whenReady = idbReady.then(() => {
+    provider?.connect();
+    return wsReady;
+  });
 
   const awareness = provider?.awareness ?? new Awareness(doc);
   const meta = doc.getMap<unknown>("meta");
@@ -218,6 +262,25 @@ export function columnId(
   let n = 2;
   while (existing.some((c) => c.id === `${base}-${n}`)) n++;
   return `${base}-${n}`;
+}
+
+/** Extract logical slug from a (possibly legacy) column id string. */
+function slugFromColumnId(colId: string, userId: string, weekId: string): string {
+  let rest = colId;
+  if (rest.startsWith(`${userId}-`)) rest = rest.slice(userId.length + 1);
+  const wkNum = weekId.replace(/^week-/, "");
+  if (rest.startsWith(`week-${wkNum}-`)) rest = rest.slice(`week-${wkNum}-`.length);
+  else if (rest.startsWith(`${wkNum}-`)) rest = rest.slice(`${wkNum}-`.length);
+  const dash = rest.indexOf("-");
+  if (dash > 0) {
+    const head = rest.slice(0, dash);
+    const isIndex = /^\d+$/.test(head);
+    const isTimestamp =
+      /^[0-9a-z]{7,10}$/.test(head) &&
+      (/\d/.test(head) || /^m[a-z0-9]{7}$/.test(head));
+    if (isIndex || isTimestamp) rest = rest.slice(dash + 1);
+  }
+  return slugify(rest);
 }
 
 // ---------- Granular read/write helpers ----------
@@ -342,21 +405,47 @@ export function buildAppData(store: Store): AppData {
   }
 
   // Splice cell values in. Doing this here rather than at write time keeps
-  // cell edits CRDT-conflict-free.
+  // cell edits CRDT-conflict-free. Also fall back to orphan keys whose slug
+  // matches the column (legacy IDs from before recovery / deterministic IDs).
   const weeks: Week[] = baseWeeks.map((w) => ({
     ...w,
-    tables: w.tables.map((t) => ({
-      ...t,
-      rows: t.rows.map((r) => ({
-        day: r.day,
-        values: Object.fromEntries(
-          t.columns.map((c) => [
-            c.id,
-            store.cells.get(cellKey(w.id, t.userId, r.day, c.id)) ?? 0,
-          ])
-        ),
-      })),
-    })),
+    tables: w.tables.map((t) => {
+      const slugToColId = new Map(
+        t.columns.map((c) => [slugify(c.name), c.id] as const)
+      );
+      const canonicalIds = new Set(t.columns.map((c) => c.id));
+      const prefix = `${w.id}:${t.userId}:`;
+      // Index orphan values for this table: day -> slug -> max value
+      const orphanByDaySlug = new Map<string, Map<string, number>>();
+      store.cells.forEach((v, k) => {
+        if (!k.startsWith(prefix)) return;
+        const parts = k.split(":");
+        if (parts.length < 4) return;
+        const day = parts[2];
+        const colId = parts.slice(3).join(":");
+        if (canonicalIds.has(colId)) return;
+        const slug = slugFromColumnId(colId, t.userId, w.id);
+        if (!slugToColId.has(slug)) return;
+        if (!orphanByDaySlug.has(day)) orphanByDaySlug.set(day, new Map());
+        const m = orphanByDaySlug.get(day)!;
+        m.set(slug, Math.max(m.get(slug) ?? 0, v));
+      });
+      return {
+        ...t,
+        rows: t.rows.map((r) => ({
+          day: r.day,
+          values: Object.fromEntries(
+            t.columns.map((c) => {
+              const direct =
+                store.cells.get(cellKey(w.id, t.userId, r.day, c.id)) ?? 0;
+              const slug = slugify(c.name);
+              const orphan = orphanByDaySlug.get(r.day)?.get(slug) ?? 0;
+              return [c.id, Math.max(direct, orphan)];
+            })
+          ),
+        })),
+      };
+    }),
   }));
   return { users, weeks };
 }
@@ -868,6 +957,295 @@ export function listPresence(store: Store): Map<number, PresenceData> {
 
 export function clientId(store: Store): number {
   return store.awareness.clientID;
+}
+
+/**
+ * Move cell values keyed under legacy column IDs into the canonical column IDs
+ * declared in the current userTables. Safe to re-run; uses MAX when both exist.
+ * Runs after a successful websocket sync so other devices see the same keys.
+ */
+export function reconcileOrphanCells(store: Store): number {
+  let moved = 0;
+  const rows = listWeekMetaRows(store);
+  store.doc.transact(() => {
+    for (const w of rows) {
+      for (const t of listUserTablesForWeek(store, w.id)) {
+        const slugToColId = new Map(
+          t.columns.map((c) => [slugify(c.name), c.id] as const)
+        );
+        const canonicalIds = new Set(t.columns.map((c) => c.id));
+        const prefix = `${w.id}:${t.userId}:`;
+        const toDelete: string[] = [];
+        store.cells.forEach((v, k) => {
+          if (!k.startsWith(prefix)) return;
+          const parts = k.split(":");
+          if (parts.length < 4) return;
+          const day = parts[2];
+          const colId = parts.slice(3).join(":");
+          if (canonicalIds.has(colId)) return;
+          const slug = slugFromColumnId(colId, t.userId, w.id);
+          const canonical = slugToColId.get(slug);
+          if (!canonical) return;
+          const ck = cellKey(w.id, t.userId, day, canonical);
+          const cur = store.cells.get(ck) ?? 0;
+          store.cells.set(ck, Math.max(cur, v));
+          toDelete.push(k);
+          moved++;
+        });
+        for (const k of toDelete) store.cells.delete(k);
+      }
+    }
+  }, "reconcileOrphanCells");
+  if (moved > 0) {
+    console.info(`[sync] reconciled ${moved} orphan cell key(s) to canonical column IDs`);
+  }
+  return moved;
+}
+
+export interface LocalImportReport {
+  rooms: Array<{
+    room: string;
+    cells: number;
+    tables: number;
+    weeks: number;
+    notes: number;
+    plans: number;
+  }>;
+  totalCells: number;
+  totalTables: number;
+  totalWeeks: number;
+  totalNotes: number;
+  totalPlans: number;
+  reconciled: number;
+}
+
+const LOCAL_IMPORT_ROOMS = [
+  // Original fallback when VITE_ROOM was missing in a stale bundle.
+  "reaching-unreal-default",
+  // Suggested example room from DEPLOY.md / older local testing.
+  "elshazly-and-elsayed",
+  // Common typo/variant users may have opened locally.
+  "elshazly-and-elsayed-2026",
+];
+
+function waitForIndexedDb(p: IndexeddbPersistence): Promise<void> {
+  return new Promise((resolve) => {
+    if (p.synced) resolve();
+    else p.once("synced", () => resolve());
+  });
+}
+
+function mergeImportedTable(
+  store: Store,
+  weekId: string,
+  incoming: UserTable
+): boolean {
+  const existing = getUserTable(store, weekId, incoming.userId);
+  if (!existing) {
+    writeUserTable(store, weekId, incoming);
+    return true;
+  }
+
+  const existingSlugs = new Set(existing.columns.map((c) => slugify(c.name)));
+  const additions = incoming.columns.filter((c) => !existingSlugs.has(slugify(c.name)));
+  if (additions.length === 0) return false;
+
+  const columns = [...existing.columns];
+  for (const c of additions) {
+    columns.push({
+      ...c,
+      id: columnId(weekId, incoming.userId, c.name, columns),
+    });
+  }
+  writeUserTable(store, weekId, {
+    ...existing,
+    columns,
+    rows: DAYS.map((day) => ({ day, values: {} })),
+  });
+  return true;
+}
+
+function importLegacyStructure(store: Store, weeks: Week[]): {
+  weeks: number;
+  tables: number;
+} {
+  let weekCount = 0;
+  let tableCount = 0;
+  for (const w of weeks) {
+    if (!store.weekMeta.has(w.id)) {
+      writeWeekMeta(store, {
+        id: w.id,
+        weekNumber: w.weekNumber,
+        startDate: w.startDate,
+        endDate: w.endDate,
+      });
+      weekCount++;
+    }
+    for (const t of w.tables) {
+      if (mergeImportedTable(store, w.id, t)) tableCount++;
+    }
+  }
+  return { weeks: weekCount, tables: tableCount };
+}
+
+/**
+ * Import positive cell values from older local IndexedDB rooms on this same
+ * browser/device. This is the recovery path for "I can see the logs on my
+ * phone, but nobody else can": the old/stale app may have written them into
+ * `reaching-unreal-default` or another local-only room, so the current shared
+ * room never saw them.
+ *
+ * Safe to run repeatedly. It only adds/raises positive cell values, imports
+ * missing weeks/tables/columns, then reconciles legacy column IDs into the
+ * current deterministic column IDs.
+ */
+export async function importLocalOfflineRooms(store: Store): Promise<LocalImportReport> {
+  const report: LocalImportReport = {
+    rooms: [],
+    totalCells: 0,
+    totalTables: 0,
+    totalWeeks: 0,
+    totalNotes: 0,
+    totalPlans: 0,
+    reconciled: 0,
+  };
+
+  const rooms = Array.from(new Set(LOCAL_IMPORT_ROOMS.filter((r) => r && r !== ROOM)));
+  for (const room of rooms) {
+    const tempDoc = new Y.Doc();
+    const tempIdb = new IndexeddbPersistence(room, tempDoc);
+    await waitForIndexedDb(tempIdb);
+
+    const localWeekMeta = tempDoc.getMap<string>("weekMeta");
+    const localUserTables = tempDoc.getMap<string>("userTables");
+    const localStructure = tempDoc.getMap<unknown>("structure");
+    const localCells = tempDoc.getMap<number>("cells");
+    const localNotes = tempDoc.getMap<string>("notes");
+    const localPlans = tempDoc.getMap<string>("plans");
+
+    const roomReport = {
+      room,
+      cells: 0,
+      tables: 0,
+      weeks: 0,
+      notes: 0,
+      plans: 0,
+    };
+
+    store.doc.transact(() => {
+      localWeekMeta.forEach((raw) => {
+        const row = parseWeekMetaRow(raw);
+        if (!row || store.weekMeta.has(row.id)) return;
+        writeWeekMeta(store, row);
+        roomReport.weeks++;
+      });
+
+      localUserTables.forEach((raw, key) => {
+        const table = parseUserTable(raw);
+        const [weekId] = key.split(":");
+        if (!table || !weekId) return;
+        if (mergeImportedTable(store, weekId, table)) roomReport.tables++;
+      });
+
+      const legacy = localStructure.get("json");
+      if (typeof legacy === "string") {
+        try {
+          const imported = importLegacyStructure(store, JSON.parse(legacy) as Week[]);
+          roomReport.weeks += imported.weeks;
+          roomReport.tables += imported.tables;
+        } catch {
+          /* ignore corrupt local legacy structure */
+        }
+      }
+
+      localCells.forEach((value, key) => {
+        if (typeof value !== "number" || value <= 0) return;
+        const current = store.cells.get(key) ?? 0;
+        if (value <= current) return;
+        store.cells.set(key, value);
+        roomReport.cells++;
+      });
+
+      localNotes.forEach((value, key) => {
+        if (typeof value !== "string" || !value) return;
+        if (store.notes.get(key)) return;
+        store.notes.set(key, value);
+        roomReport.notes++;
+      });
+
+      localPlans.forEach((value, key) => {
+        if (typeof value !== "string" || !value) return;
+        if (store.plans.get(key)) return;
+        store.plans.set(key, value);
+        roomReport.plans++;
+      });
+    }, `importLocalOfflineRoom:${room}`);
+
+    tempIdb.destroy();
+    tempDoc.destroy();
+
+    if (
+      roomReport.cells ||
+      roomReport.tables ||
+      roomReport.weeks ||
+      roomReport.notes ||
+      roomReport.plans
+    ) {
+      report.rooms.push(roomReport);
+      report.totalCells += roomReport.cells;
+      report.totalTables += roomReport.tables;
+      report.totalWeeks += roomReport.weeks;
+      report.totalNotes += roomReport.notes;
+      report.totalPlans += roomReport.plans;
+    }
+  }
+
+  report.reconciled = reconcileOrphanCells(store);
+  forceReconnect(store);
+  return report;
+}
+
+export function forceReconnect(store: Store): void {
+  const provider = store.provider;
+  if (!provider) return;
+  provider.disconnect();
+  window.setTimeout(() => provider.connect(), 250);
+}
+
+/**
+ * Keep the websocket alive and re-merge after iOS background / network drops.
+ * Call once after the store is created (App mount).
+ */
+export function setupSyncLifecycle(store: Store): () => void {
+  const provider = store.provider;
+  if (!provider || typeof document === "undefined") return () => {};
+
+  const nudge = () => {
+    provider.connect();
+  };
+
+  const onSync = (isSynced: boolean) => {
+    if (isSynced) reconcileOrphanCells(store);
+  };
+
+  const onVisible = () => {
+    if (document.visibilityState === "visible") {
+      nudge();
+      if (provider.synced) reconcileOrphanCells(store);
+    }
+  };
+
+  provider.on("sync", onSync);
+  document.addEventListener("visibilitychange", onVisible);
+  window.addEventListener("online", nudge);
+  window.addEventListener("focus", nudge);
+
+  return () => {
+    provider.off("sync", onSync);
+    document.removeEventListener("visibilitychange", onVisible);
+    window.removeEventListener("online", nudge);
+    window.removeEventListener("focus", nudge);
+  };
 }
 
 export function subscribeAll(store: Store, cb: () => void): () => void {

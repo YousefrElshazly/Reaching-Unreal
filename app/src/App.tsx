@@ -14,6 +14,7 @@ import { SummaryView } from "./components/SummaryView";
 import { PlansView } from "./components/PlansView";
 import { SettingsModal } from "./components/SettingsModal";
 import { IdentityPicker } from "./components/IdentityPicker";
+import type { SyncState } from "./store/yjs";
 import { parseISO } from "./utils/seasons";
 
 const ME_KEY = "reaching-unreal:me";
@@ -201,6 +202,7 @@ export default function App() {
       </header>
 
       <main className="max-w-[1400px] mx-auto py-4 sm:py-6 ru-safe-x ru-safe-bottom">
+        {syncStatus !== "synced" && <SyncWarning status={syncStatus} />}
         {!week && (
           <div className="text-center text-stone-500 py-20">
             No week selected.
@@ -267,31 +269,59 @@ export default function App() {
   );
 }
 
-function SyncBadge({
-  status,
-}: {
-  status: "offline" | "connecting" | "connected" | "disconnected";
-}) {
+function SyncBadge({ status }: { status: SyncState }) {
   const map = {
-    offline: { label: "Local only", dot: "bg-stone-400" },
-    connecting: { label: "Connecting…", dot: "bg-amber-400" },
-    connected: { label: "Synced", dot: "bg-emerald-500" },
-    disconnected: { label: "Reconnecting…", dot: "bg-amber-400" },
+    offline: {
+      label: "Local only",
+      dot: "bg-stone-400",
+      title: "No sync server configured — edits stay on this device only.",
+    },
+    connecting: {
+      label: "Connecting…",
+      dot: "bg-amber-400 animate-pulse",
+      title: "Connecting to the sync server…",
+    },
+    syncing: {
+      label: "Syncing…",
+      dot: "bg-amber-400 animate-pulse",
+      title: "Connected — merging with the server. Edits may not reach other devices yet.",
+    },
+    synced: {
+      label: "Live sync",
+      dot: "bg-emerald-500",
+      title: "Fully synced. Edits appear on all devices in real time.",
+    },
+    disconnected: {
+      label: "Offline",
+      dot: "bg-rose-400",
+      title: "Not connected to the sync server — edits are only on this device until reconnected.",
+    },
   } as const;
-  const { label, dot } = map[status];
+  const { label, dot, title } = map[status];
   return (
     <span
       className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-stone-100 text-stone-600"
-      title={
-        status === "offline"
-          ? "No sync server configured. Set VITE_YWS_URL to enable cross-device sync."
-          : status === "connected"
-          ? "Connected to sync server. Edits flow live to other devices."
-          : "Trying to reach the sync server."
-      }
+      title={title}
     >
       <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />
       {label}
     </span>
+  );
+}
+
+function SyncWarning({ status }: { status: SyncState }) {
+  const msg =
+    status === "offline"
+      ? "Sync server not configured — you're working offline. Edits won't appear on other devices."
+      : status === "disconnected"
+      ? "Not connected to the sync server. Keep the app open until you see “Live sync” — otherwise edits stay on this device only."
+      : status === "syncing" || status === "connecting"
+      ? "Still connecting to the sync server (can take up to a minute on first open). Wait for “Live sync” before relying on cross-device updates."
+      : "";
+  if (!msg) return null;
+  return (
+    <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+      {msg}
+    </div>
   );
 }
