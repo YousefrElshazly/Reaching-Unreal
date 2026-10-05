@@ -75,6 +75,8 @@ export interface PlanGoal {
   tag: string;
   /** Numeric target (hours for hour-columns, days/count for boolean columns). */
   target: number;
+  /** Document-style writing for this goal. */
+  details?: string;
   /** Column names (case-insensitive) whose values feed this goal. Lets one
    * goal aggregate multiple logged tags, e.g. "Sports" = ["Gym", "Squash"].
    * When undefined or empty, the goal falls back to matching by `tag`. */

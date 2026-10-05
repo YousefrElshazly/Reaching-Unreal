@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AppData, AppUser, Plan, PlanGoal, Week } from "../types";
 import {
   addGoalToPlan,
@@ -697,6 +697,7 @@ function PlanDetail({
   const [newTag, setNewTag] = useState("");
   const [newTarget, setNewTarget] = useState<number>(10);
   const [newSources, setNewSources] = useState<string[]>([]);
+  const [newDetails, setNewDetails] = useState("");
 
   const availableSources = useMemo(
     () => availableSourcesForUser(data.weeks, plan.userId),
@@ -708,10 +709,12 @@ function PlanDetail({
     addGoalToPlan(getStore(), plan.id, {
       tag: newTag.trim(),
       target: newTarget,
+      details: newDetails,
       sources: newSources.length > 0 ? newSources : undefined,
     });
     setNewTag("");
     setNewTarget(10);
+    setNewDetails("");
     setNewSources([]);
   };
 
@@ -917,6 +920,7 @@ function PlanDetail({
                 + Goal
               </button>
             </div>
+            <GoalDetailsEditor value={newDetails} onChange={setNewDetails} />
             <SourcesPicker
               available={availableSources}
               selected={newSources}
@@ -1008,6 +1012,7 @@ function GoalRow({
   const [editing, setEditing] = useState(false);
   const [draftTag, setDraftTag] = useState(goal.tag);
   const [draftTarget, setDraftTarget] = useState(goal.target);
+  const [draftDetails, setDraftDetails] = useState(goal.details ?? "");
   const [draftSources, setDraftSources] = useState<string[]>(
     goal.sources ?? []
   );
@@ -1016,6 +1021,7 @@ function GoalRow({
     updateGoal(getStore(), planId, goal.id, {
       tag: draftTag.trim(),
       target: draftTarget,
+      details: draftDetails,
       sources: draftSources.length > 0 ? draftSources : undefined,
     });
     setEditing(false);
@@ -1077,6 +1083,7 @@ function GoalRow({
               ×
             </button>
           </div>
+          {goal.details && <GoalDetails text={goal.details} />}
           <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px] text-stone-500">
             <span className="uppercase tracking-wider text-stone-400">
               {isImplicit ? "matches" : "feeds from"}
@@ -1126,6 +1133,7 @@ function GoalRow({
                 setEditing(false);
                 setDraftTag(goal.tag);
                 setDraftTarget(goal.target);
+                setDraftDetails(goal.details ?? "");
                 setDraftSources(goal.sources ?? []);
               }}
               className="px-2.5 py-1 rounded bg-stone-100 text-xs"
@@ -1133,6 +1141,7 @@ function GoalRow({
               cancel
             </button>
           </div>
+          <GoalDetailsEditor value={draftDetails} onChange={setDraftDetails} />
           <SourcesPicker
             available={availableSources}
             selected={draftSources}
@@ -1141,6 +1150,74 @@ function GoalRow({
           />
         </div>
       )}
+    </div>
+  );
+}
+
+function GoalDetails({ text }: { text: string }) {
+  return (
+    <div className="mt-3 text-sm leading-6 text-stone-700">
+      {text.split("\n").map((line, i) =>
+        line.startsWith("# ") ? (
+          <h5 key={i} className="text-xl font-semibold leading-7 text-stone-900">{line.slice(2)}</h5>
+        ) : line.startsWith("## ") ? (
+          <h6 key={i} className="text-base font-semibold text-stone-900">{line.slice(3)}</h6>
+        ) : line.startsWith("- ") ? (
+          <ul key={i} className="list-disc pl-6"><li>{line.slice(2)}</li></ul>
+        ) : (
+          <p key={i} className="min-h-6 whitespace-pre-wrap">{line || "\u00a0"}</p>
+        )
+      )}
+    </div>
+  );
+}
+
+function GoalDetailsEditor({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const addLine = (prefix: string) => {
+    const input = textarea.current;
+    if (!input) return;
+    const start = input.selectionStart;
+    const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+    onChange(value.slice(0, lineStart) + prefix + value.slice(lineStart));
+    requestAnimationFrame(() => {
+      input.focus();
+      input.setSelectionRange(start + prefix.length, start + prefix.length);
+    });
+  };
+
+  return (
+    <div className="rounded-md border border-stone-300 bg-white overflow-hidden">
+      <div className="flex gap-1 p-1 border-b border-stone-200 bg-stone-50">
+        <button type="button" onClick={() => addLine("# ")} className="px-2 py-1 rounded hover:bg-stone-200 text-sm font-semibold" title="Big heading">Title</button>
+        <button type="button" onClick={() => addLine("## ")} className="px-2 py-1 rounded hover:bg-stone-200 text-sm font-medium" title="Small heading">Heading</button>
+        <button type="button" onClick={() => addLine("- ")} className="px-2 py-1 rounded hover:bg-stone-200 text-sm" title="Bullet point">• List</button>
+      </div>
+      <textarea
+        ref={textarea}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" || e.shiftKey) return;
+          const input = e.currentTarget;
+          const start = input.selectionStart;
+          const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+          if (!value.slice(lineStart, start).startsWith("- ")) return;
+          e.preventDefault();
+          const emptyBullet = value.slice(lineStart, start) === "- ";
+          onChange(emptyBullet
+            ? value.slice(0, lineStart) + value.slice(start)
+            : value.slice(0, start) + "\n- " + value.slice(input.selectionEnd));
+          requestAnimationFrame(() => {
+            input.setSelectionRange(emptyBullet ? lineStart : start + 3, emptyBullet ? lineStart : start + 3);
+          });
+        }}
+        rows={5}
+        aria-label="Goal writing"
+        placeholder="Write about this goal. Press Enter for a new line; use Title, Heading, or List to format a line."
+        className="w-full resize-y p-3 text-sm leading-6 text-stone-800 outline-none"
+      />
+      {value.trim() && <div className="border-t border-stone-200 px-3 pb-3"><div className="pt-2 text-xs text-stone-400">Preview</div><GoalDetails text={value} /></div>}
     </div>
   );
 }

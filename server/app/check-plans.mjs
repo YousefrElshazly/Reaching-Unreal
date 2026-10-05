@@ -16,7 +16,7 @@ const result = await build({
   write: false,
   logLevel: "silent",
 });
-const { upsertPlan, getPlans, updatePlan, deletePlan } = await import(
+const { upsertPlan, getPlans, updatePlan, addGoalToPlan, updateGoal, deletePlan } = await import(
   `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString("base64")}`
 );
 const store = { plans: new Map() };
@@ -34,10 +34,16 @@ const plan = {
 upsertPlan(store, plan);
 assert.equal(store.plans.has(plan.id), false);
 assert.equal(getPlans(store)[0].name, "Test");
+addGoalToPlan(store, plan.id, { tag: "Writing", target: 5, details: "# Big title\n\n- First step" });
+const goalId = getPlans(store)[0].goals[0].id;
+assert.equal(getPlans(store)[0].goals[0].details, "# Big title\n\n- First step");
+updateGoal(store, plan.id, goalId, { details: "# Revised\n- Next step" });
+assert.equal(getPlans(store)[0].goals[0].details, "# Revised\n- Next step");
 updatePlan(store, plan.id, { archived: true });
 assert.equal(getPlans(store)[0].archived, true);
 updatePlan(store, plan.id, { private: false });
 assert.equal(store.plans.has(plan.id), true);
+assert.equal(getPlans(store)[0].goals[0].details, "# Revised\n- Next step");
 assert.equal(storage.get("reaching-unreal:private-plans"), "{}");
 deletePlan(store, plan.id);
 assert.equal(getPlans(store).length, 0);
