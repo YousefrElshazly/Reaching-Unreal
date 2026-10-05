@@ -1,4 +1,10 @@
 node_modules
+app/node_modules
+app/dist
+app/.vercel
+app/.env.local
+app/.env.*.local
+app/tsconfig.tsbuildinfo
 data
 npm-debug.log
 *.log

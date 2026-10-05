@@ -4,6 +4,7 @@ WORKDIR /app
 
 # Install deps using lockfile if present, fall back to npm install otherwise.
 COPY package*.json ./
+COPY app ./app
 RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
 
 COPY server.js ./

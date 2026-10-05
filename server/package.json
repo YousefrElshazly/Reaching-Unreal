@@ -6,7 +6,8 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "npm --prefix app ci --include=dev && VITE_YWS_URL=${VITE_YWS_URL:-wss://reaching-unreal-sync.onrender.com} VITE_ROOM=${VITE_ROOM:-shazly-sayed-2026} npm --prefix app run build"
   },
   "dependencies": {
     "web-push": "^3.6.7",

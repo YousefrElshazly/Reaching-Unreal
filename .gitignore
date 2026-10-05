@@ -7,8 +7,8 @@
 node_modules/
 
 # Build output
-app/dist/
-app/.vite/
+server/app/dist/
+server/app/.vite/
 server/data/
 
 # Env

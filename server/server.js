@@ -12,6 +12,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import { WebSocketServer } from "ws";
 import webpush from "web-push";
@@ -24,6 +25,7 @@ import * as map from "lib0/map.js";
 
 const PORT = Number(process.env.PORT || 1234);
 const HOST = process.env.HOST || "0.0.0.0";
+const APP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "app", "dist");
 const DATA_DIR = process.env.DATA_DIR || path.resolve("./data");
 const PERSIST_INTERVAL_MS = Number(process.env.PERSIST_INTERVAL_MS || 5_000);
 const MAX_ROOM_NAME_LEN = 256;
@@ -644,7 +646,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.url === "/" || req.url === "/healthz") {
+  if (req.url === "/healthz") {
     res.writeHead(200, { "content-type": "text/plain" });
     res.end(
       `Reaching Unreal sync OK · rooms=${rooms.size} · subs=${subscriptions.length}`
@@ -736,6 +738,39 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify(r));
     return;
+  }
+
+  if (req.method === "GET" || req.method === "HEAD") {
+    let pathname;
+    try {
+      pathname = decodeURIComponent(new URL(req.url, "http://localhost").pathname);
+    } catch {
+      res.writeHead(400);
+      res.end();
+      return;
+    }
+    const relative = pathname === "/" || !path.extname(pathname)
+      ? "index.html"
+      : pathname.slice(1);
+    const file = path.resolve(APP_DIR, relative);
+    if (file.startsWith(`${APP_DIR}${path.sep}`) && fs.existsSync(file) && fs.statSync(file).isFile()) {
+      const types = {
+        ".html": "text/html; charset=utf-8",
+        ".js": "text/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".json": "application/json",
+        ".webmanifest": "application/manifest+json",
+        ".svg": "image/svg+xml",
+        ".png": "image/png",
+      };
+      res.writeHead(200, {
+        "content-type": types[path.extname(file)] || "application/octet-stream",
+        "cache-control": "no-cache",
+      });
+      if (req.method === "HEAD") res.end();
+      else fs.createReadStream(file).pipe(res);
+      return;
+    }
   }
 
   res.writeHead(404);

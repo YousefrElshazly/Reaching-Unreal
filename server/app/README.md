@@ -28,7 +28,7 @@ npm start
 In another, start the app pointed at it:
 
 ```bash
-cd app
+cd server/app
 cp .env.example .env.local      # sets VITE_YWS_URL=ws://localhost:1234
 npm install
 npm run dev
@@ -38,11 +38,11 @@ Open [http://localhost:5173](http://localhost:5173) in two browsers (or two devi
 
 ## Deploy
 
-See [`../DEPLOY.md`](../DEPLOY.md) for a 10-minute Fly.io + Vercel setup, plus iPhone "Add to Home Screen" instructions.
+See [`../../DEPLOY.md`](../../DEPLOY.md) for the single-service Render setup.
 
 ## Reseed from the original xlsx
 
-The original spreadsheet (`Reaching Unreal.xlsx`) was converted into `app/src/data/seed.json` by the importer at `import_xlsx.py`. To regenerate:
+The original spreadsheet (`Reaching Unreal.xlsx`) was converted into `server/app/src/data/seed.json` by the importer at `import_xlsx.py`. To regenerate:
 
 ```bash
 pip3 install openpyxl

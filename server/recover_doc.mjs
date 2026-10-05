@@ -43,7 +43,7 @@ const DAYS = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"
 const USERS = ["shazly", "sayed"];
 
 const seed = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "../app/src/data/seed.json"), "utf8")
+  fs.readFileSync(path.join(__dirname, "app/src/data/seed.json"), "utf8")
 );
 
 const doc = new Y.Doc();

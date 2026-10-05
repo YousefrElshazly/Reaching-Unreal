@@ -24,7 +24,7 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 XLSX_PATH = Path(__file__).parent / "Reaching Unreal.xlsx"
-OUT_PATH = Path(__file__).parent / "app" / "src" / "data" / "seed.json"
+OUT_PATH = Path(__file__).parent / "server" / "app" / "src" / "data" / "seed.json"
 
 DAYS = ["Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 USER_LABELS = {"shazly": "El Shazly", "sayed": "El Sayed"}
