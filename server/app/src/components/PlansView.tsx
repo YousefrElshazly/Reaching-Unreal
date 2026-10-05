@@ -14,6 +14,7 @@ import { usePlans, useCalendar } from "../hooks/useStore";
 import type { Calendar } from "../calendars";
 import { formatRange, parseISO } from "../utils/seasons";
 import { colorForResult, textColorFor } from "../utils/colors";
+import { goalProgress } from "../utils/planGoalTotals";
 
 interface Props {
   data: AppData;
@@ -73,45 +74,16 @@ function effectiveSources(goal: PlanGoal): string[] {
   return [];
 }
 
-/** Sum the values in a user's columns whose name (case-insensitively)
- * matches ANY of the supplied source names across the week slice. */
-function computeGoalTotal(
-  weeks: Week[],
-  userId: string,
-  goal: PlanGoal
-): number {
-  const needles = new Set(
-    effectiveSources(goal)
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean)
-  );
-  if (needles.size === 0) return 0;
-  let total = 0;
-  for (const w of weeks) {
-    const t = w.tables.find((tt) => tt.userId === userId);
-    if (!t) continue;
-    const matchingCols = t.columns.filter((c) =>
-      needles.has(c.name.trim().toLowerCase())
-    );
-    if (matchingCols.length === 0) continue;
-    for (const row of t.rows) {
-      for (const c of matchingCols) {
-        total += row.values[c.id] || 0;
-      }
-    }
-  }
-  return Math.round(total * 100) / 100;
-}
-
 /** Every distinct column name that's ever appeared in the given user's
  * tables, sorted by recent usage (last-seen week first) so the most
  * relevant chips bubble to the top. */
-function availableSourcesForUser(weeks: Week[], userId: string): string[] {
+function availableSourcesForUser(weeks: Week[], userId: string, hoursOnly = false): string[] {
   const lastSeen = new Map<string, number>();
   weeks.forEach((w, idx) => {
     const t = w.tables.find((tt) => tt.userId === userId);
     if (!t) return;
     for (const c of t.columns) {
+      if (hoursOnly && c.type !== "hours") continue;
       const name = c.name.trim();
       if (!name) continue;
       lastSeen.set(name, idx);
@@ -253,10 +225,7 @@ function PlanList({
         const user = data.users.find((u) => u.id === p.userId);
         const range = weekRange(data.weeks, p.startDate, p.endDate);
         const totalWks = totalWeeksInRange(p.startDate, p.endDate);
-        const totals = p.goals.map((g) => ({
-          g,
-          total: computeGoalTotal(range, p.userId, g),
-        }));
+        const totals = p.goals.map((g) => ({ g, progress: goalProgress(range, p.userId, g) }));
         const avg = averageSatisfaction(totals);
         const dateRange =
           p.startDate && p.endDate
@@ -317,9 +286,7 @@ function PlanList({
               {p.goals.length === 0 && (
                 <span className="text-xs text-stone-400">No goals yet</span>
               )}
-              {totals.slice(0, 6).map(({ g, total }) => {
-                const pct =
-                  g.target > 0 ? Math.round((total / g.target) * 100) : 0;
+              {totals.slice(0, 6).map(({ g, progress }) => {
                 return (
                   <span
                     key={g.id}
@@ -327,9 +294,11 @@ function PlanList({
                   >
                     {g.tag}{" "}
                     <strong className="text-stone-900">
-                      {total}/{g.target}
+                      {progress.bucketed
+                        ? `Free will ${progress.freeWillTotal}/${g.buckets!.freeWill.target} · Scheduled ${progress.scheduledTotal}/${g.buckets!.scheduled.target}`
+                        : `${progress.total}/${progress.target}`}
                     </strong>{" "}
-                    <span className="text-stone-400">({pct}%)</span>
+                    <span className="text-stone-400">({progress.satisfaction}%)</span>
                   </span>
                 );
               })}
@@ -548,12 +517,14 @@ function SourcesPicker({
   selected,
   onChange,
   fallbackTag,
+  label = "Feeds from",
 }: {
   available: string[];
   selected: string[];
   onChange: (next: string[]) => void;
   /** When selected is empty, we say "will match column named …" — preview. */
   fallbackTag?: string;
+  label?: string;
 }) {
   const [customInput, setCustomInput] = useState("");
   const isSelected = (name: string) =>
@@ -582,7 +553,7 @@ function SourcesPicker({
     <div className="text-xs">
       <div className="flex items-center gap-2 mb-1.5">
         <span className="uppercase tracking-wider text-stone-500">
-          Feeds from
+          {label}
         </span>
         {selected.length === 0 ? (
           <span className="text-stone-400">
@@ -650,6 +621,39 @@ function SourcesPicker({
   );
 }
 
+function BucketEditor({
+  label, target, onTargetChange, sources, onSourcesChange, available,
+}: {
+  label: string;
+  target: number;
+  onTargetChange: (value: number) => void;
+  sources: string[];
+  onSourcesChange: (value: string[]) => void;
+  available: string[];
+}) {
+  return (
+    <div className="rounded-lg border border-stone-200 bg-white p-3 space-y-3">
+      <label className="flex items-center justify-between gap-3 text-sm font-medium text-stone-700">
+        {label} target (hours)
+        <input
+          type="number"
+          min="0"
+          step="0.5"
+          value={target}
+          onChange={(e) => onTargetChange(Math.max(0, Number(e.target.value) || 0))}
+          className="w-24 px-2 py-1 rounded border border-stone-300 text-sm"
+        />
+      </label>
+      <details className="text-xs text-stone-600">
+        <summary className="cursor-pointer select-none">{sources.length ? `${sources.length} linked: ${sources.join(", ")}` : "Link week-log tags"}</summary>
+        <div className="mt-3">
+          <SourcesPicker available={available} selected={sources} onChange={onSourcesChange} label={`${label} tags`} />
+        </div>
+      </details>
+    </div>
+  );
+}
+
 // ---------- Detail ----------
 
 function PlanDetail({
@@ -683,39 +687,46 @@ function PlanDetail({
 
   const goalRows = useMemo(
     () =>
-      plan.goals.map((g) => {
-        const total = computeGoalTotal(range, plan.userId, g);
-        const pct =
-          g.target > 0 ? Math.round((total / g.target) * 100) : 0;
-        return { g, total, pct };
-      }),
+      plan.goals.map((g) => ({ g, progress: goalProgress(range, plan.userId, g) })),
     [plan.goals, range, plan.userId]
   );
 
-  const avg = averageSatisfaction(goalRows.map((r) => ({ g: r.g, total: r.total })));
+  const avg = averageSatisfaction(goalRows);
 
   const [newTag, setNewTag] = useState("");
-  const [newTarget, setNewTarget] = useState<number>(10);
-  const [newSources, setNewSources] = useState<string[]>([]);
+  const [newFreeWillTarget, setNewFreeWillTarget] = useState(0);
+  const [newScheduledTarget, setNewScheduledTarget] = useState(0);
+  const [newFreeWillSources, setNewFreeWillSources] = useState<string[]>([]);
+  const [newScheduledSources, setNewScheduledSources] = useState<string[]>([]);
   const [newDetails, setNewDetails] = useState("");
 
   const availableSources = useMemo(
     () => availableSourcesForUser(data.weeks, plan.userId),
     [data.weeks, plan.userId]
   );
+  const availableHourSources = useMemo(
+    () => availableSourcesForUser(data.weeks, plan.userId, true),
+    [data.weeks, plan.userId]
+  );
 
   const addGoal = () => {
-    if (!newTag.trim() || !(newTarget > 0)) return;
+    if (!newTag.trim() || !(newFreeWillTarget > 0 || newScheduledTarget > 0)) return;
     addGoalToPlan(getStore(), plan.id, {
       tag: newTag.trim(),
-      target: newTarget,
+      target: newFreeWillTarget + newScheduledTarget,
       details: newDetails,
-      sources: newSources.length > 0 ? newSources : undefined,
+      sources: [...newFreeWillSources, ...newScheduledSources],
+      buckets: {
+        freeWill: { target: newFreeWillTarget, sources: newFreeWillSources },
+        scheduled: { target: newScheduledTarget, sources: newScheduledSources },
+      },
     });
     setNewTag("");
-    setNewTarget(10);
+    setNewFreeWillTarget(0);
+    setNewScheduledTarget(0);
     setNewDetails("");
-    setNewSources([]);
+    setNewFreeWillSources([]);
+    setNewScheduledSources([]);
   };
 
   const saveEdit = () => {
@@ -880,19 +891,19 @@ function PlanDetail({
         <h4 className="text-sm font-semibold text-stone-700 mb-2">Goals</h4>
         {goalRows.length === 0 && (
           <div className="text-sm text-stone-400 mb-3">
-            No goals yet. Name a goal, set its target, then pick which logged
-            tags feed it (e.g. <em>Sports</em> ← Gym + Squash).
+            No goals yet. Name a goal, set Free will and Scheduled hour targets,
+            then link the matching week-log tags to each bucket.
           </div>
         )}
         <div className="rounded-xl border border-stone-200 overflow-hidden">
-          {goalRows.map(({ g, total, pct }) => (
+          {goalRows.map(({ g, progress }) => (
             <GoalRow
               key={g.id}
               planId={plan.id}
               goal={g}
-              total={total}
-              pct={pct}
+              progress={progress}
               availableSources={availableSources}
+              availableHourSources={availableHourSources}
             />
           ))}
           <div className="p-3 bg-stone-50 border-t border-stone-200 space-y-2.5">
@@ -902,31 +913,21 @@ function PlanDetail({
                 onChange={(e) => setNewTag(e.target.value)}
                 placeholder="Goal name (e.g. Sports)"
                 className="flex-1 min-w-[160px] px-3 py-1.5 rounded-md border border-stone-300 text-sm"
-                onKeyDown={(e) => e.key === "Enter" && addGoal()}
               />
-              <input
-                type="number"
-                value={newTarget}
-                onChange={(e) => setNewTarget(parseFloat(e.target.value) || 0)}
-                placeholder="Target"
-                className="w-28 px-3 py-1.5 rounded-md border border-stone-300 text-sm"
-                onKeyDown={(e) => e.key === "Enter" && addGoal()}
-              />
-              <button
-                onClick={addGoal}
-                disabled={!newTag.trim() || !(newTarget > 0)}
-                className="px-3 py-1.5 rounded-md bg-stone-900 text-white text-sm font-medium disabled:opacity-50"
-              >
-                + Goal
-              </button>
             </div>
             <GoalDetailsEditor value={newDetails} onChange={setNewDetails} />
-            <SourcesPicker
-              available={availableSources}
-              selected={newSources}
-              onChange={setNewSources}
-              fallbackTag={newTag}
-            />
+            <div className="grid gap-2 sm:grid-cols-2">
+              <BucketEditor label="Free will" target={newFreeWillTarget} onTargetChange={setNewFreeWillTarget} sources={newFreeWillSources} onSourcesChange={(next) => {
+                setNewFreeWillSources(next);
+                setNewScheduledSources((current) => current.filter((s) => !next.some((n) => n.toLowerCase() === s.toLowerCase())));
+              }} available={availableHourSources} />
+              <BucketEditor label="Scheduled" target={newScheduledTarget} onTargetChange={setNewScheduledTarget} sources={newScheduledSources} onSourcesChange={(next) => {
+                setNewScheduledSources(next);
+                setNewFreeWillSources((current) => current.filter((s) => !next.some((n) => n.toLowerCase() === s.toLowerCase())));
+              }} available={availableHourSources} />
+            </div>
+            <p className="text-xs text-stone-500">Only week-log tags set to Hours count toward these buckets.</p>
+            <button onClick={addGoal} disabled={!newTag.trim() || !(newFreeWillTarget > 0 || newScheduledTarget > 0)} className="px-3 py-1.5 rounded-md bg-stone-900 text-white text-sm font-medium disabled:opacity-50">+ Goal</button>
           </div>
         </div>
       </section>
@@ -999,15 +1000,15 @@ function PlanDetail({
 function GoalRow({
   planId,
   goal,
-  total,
-  pct,
+  progress,
   availableSources,
+  availableHourSources,
 }: {
   planId: string;
   goal: PlanGoal;
-  total: number;
-  pct: number;
+  progress: ReturnType<typeof goalProgress>;
   availableSources: string[];
+  availableHourSources: string[];
 }) {
   const [editing, setEditing] = useState(false);
   const [draftTag, setDraftTag] = useState(goal.tag);
@@ -1016,19 +1017,28 @@ function GoalRow({
   const [draftSources, setDraftSources] = useState<string[]>(
     goal.sources ?? []
   );
+  const [bucketed, setBucketed] = useState(Boolean(goal.buckets));
+  const [freeWillTarget, setFreeWillTarget] = useState(goal.buckets?.freeWill.target ?? 0);
+  const [scheduledTarget, setScheduledTarget] = useState(goal.buckets?.scheduled.target ?? 0);
+  const [freeWillSources, setFreeWillSources] = useState(goal.buckets?.freeWill.sources ?? []);
+  const [scheduledSources, setScheduledSources] = useState(goal.buckets?.scheduled.sources ?? []);
 
   const save = () => {
+    if (!draftTag.trim() || (bucketed ? !(freeWillTarget > 0 || scheduledTarget > 0) : !(draftTarget > 0))) return;
     updateGoal(getStore(), planId, goal.id, {
       tag: draftTag.trim(),
-      target: draftTarget,
+      target: bucketed ? freeWillTarget + scheduledTarget : draftTarget,
       details: draftDetails,
-      sources: draftSources.length > 0 ? draftSources : undefined,
+      sources: bucketed ? [...freeWillSources, ...scheduledSources] : draftSources.length > 0 ? draftSources : undefined,
+      buckets: bucketed ? {
+        freeWill: { target: freeWillTarget, sources: freeWillSources },
+        scheduled: { target: scheduledTarget, sources: scheduledSources },
+      } : undefined,
     });
     setEditing(false);
   };
 
-  const cappedPct = Math.min(100, pct);
-  const overshoot = pct > 100;
+  const cappedPct = Math.min(100, progress.satisfaction);
   const barColor = colorForResult(cappedPct);
   const displaySources = effectiveSources(goal);
   const isImplicit = !goal.sources || goal.sources.length === 0;
@@ -1043,13 +1053,12 @@ function GoalRow({
                 {goal.tag}
               </div>
               <div className="text-xs text-stone-500">
-                <span className="font-semibold text-stone-700">{total}</span> /{" "}
-                {goal.target}
-                {overshoot && (
-                  <span className="ml-2 text-emerald-700 font-semibold">
-                    over by {Math.round(pct - 100)}%
-                  </span>
-                )}
+                {goal.buckets ? (
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1">
+                    <span>Free will <strong className="text-stone-700">{progress.freeWillTotal}/{goal.buckets.freeWill.target} h</strong></span>
+                    <span>Scheduled <strong className="text-stone-700">{progress.scheduledTotal}/{goal.buckets.scheduled.target} h</strong></span>
+                  </div>
+                ) : <><span className="font-semibold text-stone-700">{progress.total}</span> / {goal.target} · Unsplit</>}
               </div>
             </div>
             <div className="w-40 sm:w-56 flex-shrink-0">
@@ -1063,7 +1072,7 @@ function GoalRow({
                 />
               </div>
               <div className="text-[11px] text-right text-stone-500 mt-0.5">
-                {pct}%
+                {progress.satisfaction}%
               </div>
             </div>
             <button
@@ -1084,27 +1093,18 @@ function GoalRow({
             </button>
           </div>
           {goal.details && <GoalDetails text={goal.details} />}
-          <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px] text-stone-500">
-            <span className="uppercase tracking-wider text-stone-400">
-              {isImplicit ? "matches" : "feeds from"}
-            </span>
-            {displaySources.length === 0 && (
-              <span className="text-stone-400 italic">— pick sources</span>
-            )}
-            {displaySources.map((s) => (
-              <span
-                key={s}
-                className="px-1.5 py-0.5 rounded border border-stone-200 bg-white text-stone-700"
-              >
-                {s}
-              </span>
-            ))}
-            {isImplicit && displaySources.length > 0 && (
-              <span className="text-stone-400 italic">
-                (auto-matched to column name)
-              </span>
-            )}
-          </div>
+          {goal.buckets ? (
+            <div className="mt-2 grid gap-1 text-xs text-stone-500">
+              <div>Free will tags: {goal.buckets.freeWill.sources.join(", ") || "none linked"}</div>
+              <div>Scheduled tags: {goal.buckets.scheduled.sources.join(", ") || "none linked"}</div>
+            </div>
+          ) : (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px] text-stone-500">
+              <span className="uppercase tracking-wider text-stone-400">{isImplicit ? "matches" : "feeds from"}</span>
+              {displaySources.map((s) => <span key={s} className="px-1.5 py-0.5 rounded border border-stone-200 bg-white text-stone-700">{s}</span>)}
+              {isImplicit && displaySources.length > 0 && <span className="text-stone-400 italic">(auto-matched to column name)</span>}
+            </div>
+          )}
         </>
       ) : (
         <div className="space-y-2.5">
@@ -1114,13 +1114,6 @@ function GoalRow({
               onChange={(e) => setDraftTag(e.target.value)}
               className="flex-1 min-w-[140px] px-2 py-1 rounded border border-stone-300 text-sm"
               placeholder="Goal name"
-            />
-            <input
-              type="number"
-              value={draftTarget}
-              onChange={(e) => setDraftTarget(parseFloat(e.target.value) || 0)}
-              className="w-24 px-2 py-1 rounded border border-stone-300 text-sm"
-              placeholder="Target"
             />
             <button
               onClick={save}
@@ -1135,6 +1128,11 @@ function GoalRow({
                 setDraftTarget(goal.target);
                 setDraftDetails(goal.details ?? "");
                 setDraftSources(goal.sources ?? []);
+                setBucketed(Boolean(goal.buckets));
+                setFreeWillTarget(goal.buckets?.freeWill.target ?? 0);
+                setScheduledTarget(goal.buckets?.scheduled.target ?? 0);
+                setFreeWillSources(goal.buckets?.freeWill.sources ?? []);
+                setScheduledSources(goal.buckets?.scheduled.sources ?? []);
               }}
               className="px-2.5 py-1 rounded bg-stone-100 text-xs"
             >
@@ -1142,12 +1140,34 @@ function GoalRow({
             </button>
           </div>
           <GoalDetailsEditor value={draftDetails} onChange={setDraftDetails} />
-          <SourcesPicker
-            available={availableSources}
-            selected={draftSources}
-            onChange={setDraftSources}
-            fallbackTag={draftTag}
-          />
+          {bucketed ? (
+            <div className="grid gap-2 sm:grid-cols-2">
+              <BucketEditor label="Free will" target={freeWillTarget} onTargetChange={setFreeWillTarget} sources={freeWillSources} onSourcesChange={(next) => {
+                setFreeWillSources(next);
+                setScheduledSources((current) => current.filter((s) => !next.some((n) => n.toLowerCase() === s.toLowerCase())));
+              }} available={availableHourSources} />
+              <BucketEditor label="Scheduled" target={scheduledTarget} onTargetChange={setScheduledTarget} sources={scheduledSources} onSourcesChange={(next) => {
+                setScheduledSources(next);
+                setFreeWillSources((current) => current.filter((s) => !next.some((n) => n.toLowerCase() === s.toLowerCase())));
+              }} available={availableHourSources} />
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm text-stone-600">Unsplit target
+                <input type="number" min="0" value={draftTarget} onChange={(e) => setDraftTarget(Number(e.target.value) || 0)} className="w-24 px-2 py-1 rounded border border-stone-300" />
+              </label>
+              <SourcesPicker available={availableSources} selected={draftSources} onChange={setDraftSources} fallbackTag={draftTag} />
+              <button type="button" onClick={() => {
+                setBucketed(true);
+                setFreeWillTarget(draftTarget);
+                setFreeWillSources(effectiveSources({ ...goal, tag: draftTag, sources: draftSources }).filter((s) =>
+                  !availableSources.some((a) => a.toLowerCase() === s.toLowerCase()) ||
+                  availableHourSources.some((a) => a.toLowerCase() === s.toLowerCase())
+                ));
+              }} className="text-xs underline text-stone-600">Split into Free will and Scheduled hours</button>
+              <p className="text-xs text-stone-400">After splitting, only hour-type week-log tags count toward these targets.</p>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -1223,13 +1243,8 @@ function GoalDetailsEditor({ value, onChange }: { value: string; onChange: (valu
 }
 
 function averageSatisfaction(
-  rows: Array<{ g: PlanGoal; total: number }>
+  rows: Array<{ progress: ReturnType<typeof goalProgress> }>
 ): number {
   if (rows.length === 0) return 0;
-  let sum = 0;
-  for (const { g, total } of rows) {
-    if (!(g.target > 0)) continue;
-    sum += Math.min(1, total / g.target);
-  }
-  return Math.round((sum / rows.length) * 100);
+  return Math.round(rows.reduce((sum, row) => sum + row.progress.satisfaction, 0) / rows.length);
 }

@@ -77,6 +77,11 @@ export interface PlanGoal {
   target: number;
   /** Document-style writing for this goal. */
   details?: string;
+  /** Separate hour targets and linked week-log columns. Absent on older goals. */
+  buckets?: {
+    freeWill: { target: number; sources: string[] };
+    scheduled: { target: number; sources: string[] };
+  };
   /** Column names (case-insensitive) whose values feed this goal. Lets one
    * goal aggregate multiple logged tags, e.g. "Sports" = ["Gym", "Squash"].
    * When undefined or empty, the goal falls back to matching by `tag`. */
