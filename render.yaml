@@ -1,5 +1,17 @@
 services:
   - type: web
+    name: reaching-unreal-app
+    runtime: static
+    buildCommand: cd app && npm ci && npm run build
+    staticPublishPath: ./app/dist
+    envVars:
+      - key: VITE_YWS_URL
+        value: wss://reaching-unreal-sync.onrender.com
+      # Use the same room as the current app so existing logs load.
+      - key: VITE_ROOM
+        sync: false
+
+  - type: web
     name: reaching-unreal-sync
     runtime: node
     plan: free
