@@ -51,7 +51,7 @@ export default function App() {
   const [me, setMe] = useState<AppUser | null>(loadMe);
   const [currentId, setCurrentId] = useState<string>("");
   const [showSummary, setShowSummary] = useState(false);
-  const [showPlans, setShowPlans] = useState(false);
+  const [showPlans, setShowPlans] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
 
   // initialize/refresh current week selection
@@ -84,6 +84,7 @@ export default function App() {
       last = created;
       safety++;
     }
+    if (safety > 0) setCurrentId(last.id);
     // No state update needed — Yjs will fire subscribeAll and re-render.
     // currentId effect above will reselect "today" if it was outdated.
   }, [data.weeks, seeded]);
@@ -190,25 +191,36 @@ export default function App() {
               )}
             </div>
           </div>
-          <WeekNav
+          <div className="flex items-center gap-2 mb-2">
+            <button onClick={() => setShowPlans(true)} aria-current={showPlans ? "page" : undefined} className={`px-3 py-1.5 rounded-md text-sm font-medium ${showPlans ? "bg-stone-900 text-white" : "bg-white border border-stone-200"}`}>Plans</button>
+            <button onClick={() => setShowPlans(false)} aria-current={!showPlans ? "page" : undefined} className={`px-3 py-1.5 rounded-md text-sm font-medium ${!showPlans ? "bg-stone-900 text-white" : "bg-white border border-stone-200"}`}>Weekly log</button>
+            <button onClick={() => setShowSettings(true)} className="ml-auto px-3 py-1.5 rounded-md bg-white border border-stone-200 text-sm" aria-label="Settings">⚙</button>
+          </div>
+          {!showPlans && <WeekNav
             weeks={data.weeks}
             currentId={currentId}
             onSelect={setCurrentId}
             onShowSummary={() => setShowSummary(true)}
-            onShowPlans={() => setShowPlans(true)}
-            onShowSettings={() => setShowSettings(true)}
-          />
+          />}
         </div>
       </header>
 
       <main className="max-w-[1400px] mx-auto py-4 sm:py-6 ru-safe-x ru-safe-bottom">
         {syncStatus !== "synced" && <SyncWarning status={syncStatus} />}
-        {!week && (
+        {showPlans ? (
+          <PlansView
+            data={data}
+            me={me}
+            onJumpToWeek={(id) => {
+              setCurrentId(id);
+              setShowPlans(false);
+            }}
+          />
+        ) : !week ? (
           <div className="text-center text-stone-500 py-20">
             No week selected.
           </div>
-        )}
-        {week && (
+        ) : (
           <div className="flex flex-col gap-6">
             {[...week.tables]
               .sort((a, b) => {
@@ -247,17 +259,6 @@ export default function App() {
           data={data}
           onClose={() => setShowSummary(false)}
           onJumpToWeek={(id) => setCurrentId(id)}
-        />
-      )}
-      {showPlans && (
-        <PlansView
-          data={data}
-          me={me}
-          onClose={() => setShowPlans(false)}
-          onJumpToWeek={(id) => {
-            setCurrentId(id);
-            setShowPlans(false);
-          }}
         />
       )}
       {showSettings && (

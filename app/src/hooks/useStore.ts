@@ -8,6 +8,7 @@ import {
   getSyncState,
   hydrateSeedIfEmpty,
   listPresence,
+  PRIVATE_PLANS_CHANGED,
   setupSyncLifecycle,
   subscribeAll,
   type SyncState,
@@ -126,7 +127,13 @@ export function usePlans(): Plan[] {
         cb();
       };
       store.plans.observe(handler);
-      return () => store.plans.unobserve(handler);
+      window.addEventListener(PRIVATE_PLANS_CHANGED, handler);
+      window.addEventListener("storage", handler);
+      return () => {
+        store.plans.unobserve(handler);
+        window.removeEventListener(PRIVATE_PLANS_CHANGED, handler);
+        window.removeEventListener("storage", handler);
+      };
     },
     ensurePlans,
     ensurePlans

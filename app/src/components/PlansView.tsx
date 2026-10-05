@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { AppData, AppUser, Plan, PlanGoal, Week } from "../types";
 import {
   addGoalToPlan,
@@ -18,7 +18,6 @@ import { colorForResult, textColorFor } from "../utils/colors";
 interface Props {
   data: AppData;
   me: AppUser | null;
-  onClose: () => void;
   onJumpToWeek?: (weekId: string) => void;
 }
 
@@ -123,19 +122,27 @@ function availableSourcesForUser(weeks: Week[], userId: string): string[] {
     .map(([name]) => name);
 }
 
-export function PlansView({ data, me, onClose, onJumpToWeek }: Props) {
+export function PlansView({ data, me, onJumpToWeek }: Props) {
   const plans = usePlans();
   const [openId, setOpenId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [filterUser, setFilterUser] = useState<string>("all");
+  const [showArchived, setShowArchived] = useState(false);
 
-  const filtered = plans.filter((p) =>
-    filterUser === "all" ? true : p.userId === filterUser
+  useEffect(() => {
+    setOpenId(null);
+    setCreating(false);
+  }, [me?.id]);
+
+  const visible = plans.filter((p) => !p.private || p.userId === me?.id);
+  const openPlan = visible.find((p) => p.id === openId);
+  const filtered = visible.filter((p) =>
+    Boolean(p.archived) === showArchived &&
+    (filterUser === "all" || p.userId === filterUser)
   );
 
   return (
-    <div className="fixed inset-0 z-40 bg-stone-900/40 backdrop-blur-sm flex items-start justify-center overflow-auto py-10 px-4">
-      <div className="bg-white rounded-2xl shadow-xl border border-stone-200 max-w-5xl w-full overflow-hidden">
+    <div className="bg-white rounded-2xl shadow-sm border border-stone-200 max-w-5xl mx-auto overflow-hidden">
         <div className="flex items-center gap-3 px-6 py-4 border-b border-stone-200 flex-wrap">
           <h2 className="text-lg font-semibold text-stone-800">Plans</h2>
           {!openId && !creating && (
@@ -153,7 +160,17 @@ export function PlansView({ data, me, onClose, onJumpToWeek }: Props) {
                 ))}
               </select>
               <button
-                onClick={() => setCreating(true)}
+                onClick={() => setShowArchived((value) => !value)}
+                className="px-3 py-1.5 rounded-md border border-stone-200 text-sm"
+                aria-pressed={showArchived}
+              >
+                {showArchived ? "← Active plans" : "View archive"}
+              </button>
+              <button
+                onClick={() => {
+                  setShowArchived(false);
+                  setCreating(true);
+                }}
                 className="px-3 py-1.5 rounded-md bg-stone-900 text-white hover:bg-stone-800 text-sm font-medium"
               >
                 + New plan
@@ -171,12 +188,6 @@ export function PlansView({ data, me, onClose, onJumpToWeek }: Props) {
               ← Back
             </button>
           )}
-          <button
-            onClick={onClose}
-            className="ml-auto px-3 py-1.5 rounded-md bg-stone-100 hover:bg-stone-200 text-sm"
-          >
-            Close
-          </button>
         </div>
 
         <div className="p-6">
@@ -184,6 +195,7 @@ export function PlansView({ data, me, onClose, onJumpToWeek }: Props) {
             <PlanCreateForm
               data={data}
               defaultUserId={me?.id ?? data.users[0]?.id ?? ""}
+              me={me}
               onCancel={() => setCreating(false)}
               onCreated={(id) => {
                 setCreating(false);
@@ -191,26 +203,24 @@ export function PlansView({ data, me, onClose, onJumpToWeek }: Props) {
               }}
             />
           )}
-          {!creating && openId && (
+          {!creating && openId && openPlan && (
             <PlanDetail
-              plan={
-                plans.find((p) => p.id === openId) ??
-                ({} as Plan)
-              }
+              plan={openPlan}
               data={data}
+              me={me}
               onJumpToWeek={onJumpToWeek}
               onDeleted={() => setOpenId(null)}
             />
           )}
-          {!creating && !openId && (
+          {!creating && (!openId || !openPlan) && (
             <PlanList
               plans={filtered}
+              archived={showArchived}
               data={data}
               onOpen={(id) => setOpenId(id)}
             />
           )}
         </div>
-      </div>
     </div>
   );
 }
@@ -219,10 +229,12 @@ export function PlansView({ data, me, onClose, onJumpToWeek }: Props) {
 
 function PlanList({
   plans,
+  archived,
   data,
   onOpen,
 }: {
   plans: Plan[];
+  archived: boolean;
   data: AppData;
   onOpen: (id: string) => void;
 }) {
@@ -230,10 +242,8 @@ function PlanList({
   if (plans.length === 0) {
     return (
       <div className="text-center text-stone-500 py-16">
-        <p className="text-sm">No plans yet.</p>
-        <p className="text-xs mt-1">
-          Click <strong>+ New plan</strong> to create one.
-        </p>
+        <p className="text-sm">{archived ? "No archived plans." : "No plans yet."}</p>
+        {!archived && <p className="text-xs mt-1">Click <strong>+ New plan</strong> to create one.</p>}
       </div>
     );
   }
@@ -276,7 +286,7 @@ function PlanList({
               )}
               <div className="flex-1 min-w-0">
                 <div className="font-semibold text-stone-800 truncate">
-                  {p.name || "(untitled plan)"}
+                  {p.name || "(untitled plan)"} {p.private && <span className="text-xs font-normal text-stone-500">· Private</span>}
                 </div>
                 <div
                   className="text-xs text-stone-500 mt-0.5"
@@ -341,17 +351,20 @@ function PlanList({
 function PlanCreateForm({
   data,
   defaultUserId,
+  me,
   onCancel,
   onCreated,
 }: {
   data: AppData;
   defaultUserId: string;
+  me: AppUser | null;
   onCancel: () => void;
   onCreated: (id: string) => void;
 }) {
   const calendar = useCalendar();
   const [name, setName] = useState("");
   const [userId, setUserId] = useState(defaultUserId);
+  const [isPrivate, setIsPrivate] = useState(false);
   // Default: this week's Saturday → 4 weeks out, so a "new plan" reads as
   // "plan for the next month" out of the box.
   const todaySaturday = snapToSaturday(fmtIso(new Date()));
@@ -364,12 +377,13 @@ function PlanCreateForm({
   const [endDate, setEndDate] = useState(fourWeeksOut);
 
   const submit = () => {
-    if (!name.trim() || !startDate || !endDate || !userId) return;
+    if (!name.trim() || !startDate || !endDate || !userId || (isPrivate && userId !== me?.id)) return;
     const id = newPlanId();
     const plan: Plan = {
       id,
       name: name.trim(),
       userId,
+      private: isPrivate,
       startDate,
       endDate,
       goals: [],
@@ -396,13 +410,20 @@ function PlanCreateForm({
           className="mt-1 w-full px-3 py-2 rounded-md border border-stone-300 text-sm"
         />
       </label>
+      <label className="flex items-start gap-2 text-sm text-stone-700">
+        <input type="checkbox" checked={isPrivate} onChange={(e) => setIsPrivate(e.target.checked)} disabled={!me || userId !== me.id} className="mt-1" />
+        <span>Private <span className="block text-xs text-stone-500">Stored only in this browser, not synced. Anyone using this browser can switch identities.</span></span>
+      </label>
       <label className="block">
         <span className="text-xs uppercase tracking-wider text-stone-500">
           Assigned to
         </span>
         <select
           value={userId}
-          onChange={(e) => setUserId(e.target.value)}
+          onChange={(e) => {
+            setUserId(e.target.value);
+            if (e.target.value !== me?.id) setIsPrivate(false);
+          }}
           className="mt-1 w-full px-3 py-2 rounded-md border border-stone-300 text-sm bg-white"
         >
           {data.users.map((u) => (
@@ -634,11 +655,13 @@ function SourcesPicker({
 function PlanDetail({
   plan,
   data,
+  me,
   onJumpToWeek,
   onDeleted,
 }: {
   plan: Plan;
   data: AppData;
+  me: AppUser | null;
   onJumpToWeek?: (weekId: string) => void;
   onDeleted: () => void;
 }) {
@@ -650,6 +673,7 @@ function PlanDetail({
   const [draftUserId, setDraftUserId] = useState(plan.userId);
   const [draftStart, setDraftStart] = useState(plan.startDate);
   const [draftEnd, setDraftEnd] = useState(plan.endDate);
+  const [draftPrivate, setDraftPrivate] = useState(Boolean(plan.private));
 
   const range = useMemo(
     () => weekRange(data.weeks, plan.startDate, plan.endDate),
@@ -692,12 +716,13 @@ function PlanDetail({
   };
 
   const saveEdit = () => {
-    if (!draftName.trim() || !draftStart || !draftEnd || !draftUserId) return;
+    if (!draftName.trim() || !draftStart || !draftEnd || !draftUserId || (draftPrivate && draftUserId !== me?.id)) return;
     updatePlan(getStore(), plan.id, {
       name: draftName.trim(),
       userId: draftUserId,
       startDate: draftStart,
       endDate: draftEnd,
+      private: draftPrivate,
       // Clear legacy weekId pointers once we've upgraded to date-anchored.
       startWeekId: undefined,
       endWeekId: undefined,
@@ -749,6 +774,7 @@ function PlanDetail({
                   </span>
                 )}
               </div>
+              {plan.private && <div className="text-xs text-stone-500 mt-1">Private · saved in this browser only</div>}
             </div>
             <div className="flex items-center gap-2">
               <div
@@ -761,6 +787,12 @@ function PlanDetail({
               >
                 {avg}% overall
               </div>
+              <button
+                onClick={() => updatePlan(getStore(), plan.id, { archived: !plan.archived })}
+                className="px-3 py-1.5 rounded-md bg-white border border-stone-200 hover:bg-stone-100 text-sm"
+              >
+                {plan.archived ? "Restore" : "Archive"}
+              </button>
               <button
                 onClick={() => setEditing(true)}
                 className="px-3 py-1.5 rounded-md bg-white border border-stone-200 hover:bg-stone-100 text-sm"
@@ -786,7 +818,10 @@ function PlanDetail({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <select
                 value={draftUserId}
-                onChange={(e) => setDraftUserId(e.target.value)}
+                onChange={(e) => {
+                  setDraftUserId(e.target.value);
+                  if (e.target.value !== me?.id) setDraftPrivate(false);
+                }}
                 className="px-3 py-2 rounded-md border border-stone-300 text-sm bg-white"
               >
                 {data.users.map((u) => (
@@ -808,6 +843,10 @@ function PlanDetail({
                 calendar={calendar}
               />
             </div>
+            <label className="flex items-start gap-2 text-sm text-stone-700">
+              <input type="checkbox" checked={draftPrivate} onChange={(e) => setDraftPrivate(e.target.checked)} disabled={!me || draftUserId !== me.id} className="mt-1" />
+              <span>Private <span className="block text-xs text-stone-500">Stored only in this browser, not synced. Anyone using this browser can switch identities.</span></span>
+            </label>
             <div className="flex gap-2">
               <button
                 onClick={saveEdit}
@@ -822,6 +861,7 @@ function PlanDetail({
                   setDraftUserId(plan.userId);
                   setDraftStart(plan.startDate);
                   setDraftEnd(plan.endDate);
+                  setDraftPrivate(Boolean(plan.private));
                 }}
                 className="px-4 py-2 rounded-md bg-stone-100 hover:bg-stone-200 text-sm"
               >

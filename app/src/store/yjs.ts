@@ -1289,6 +1289,22 @@ export function setNote(
 
 // ---------- Plans ----------
 
+const PRIVATE_PLANS_KEY = "reaching-unreal:private-plans";
+export const PRIVATE_PLANS_CHANGED = "reaching-unreal:private-plans-changed";
+
+function localPlans(): Record<string, Plan> {
+  try {
+    return JSON.parse(localStorage.getItem(PRIVATE_PLANS_KEY) || "{}") as Record<string, Plan>;
+  } catch {
+    return {};
+  }
+}
+
+function saveLocalPlans(plans: Record<string, Plan>): void {
+  localStorage.setItem(PRIVATE_PLANS_KEY, JSON.stringify(plans));
+  window.dispatchEvent(new Event(PRIVATE_PLANS_CHANGED));
+}
+
 /**
  * Plans created before we switched to date-anchored ranges stored
  * `startWeekId`/`endWeekId` instead of `startDate`/`endDate`. Resolve the
@@ -1312,7 +1328,7 @@ function resolveLegacyPlan(store: Store, raw: Plan): Plan {
 }
 
 export function getPlans(store: Store): Plan[] {
-  const out: Plan[] = [];
+  const out: Plan[] = Object.values(localPlans());
   store.plans.forEach((raw) => {
     if (typeof raw !== "string") return;
     try {
@@ -1325,6 +1341,8 @@ export function getPlans(store: Store): Plan[] {
 }
 
 export function getPlan(store: Store, planId: string): Plan | null {
+  const local = localPlans()[planId];
+  if (local) return local;
   const raw = store.plans.get(planId);
   if (typeof raw !== "string") return null;
   try {
@@ -1335,11 +1353,27 @@ export function getPlan(store: Store, planId: string): Plan | null {
 }
 
 export function upsertPlan(store: Store, plan: Plan): void {
-  store.plans.set(plan.id, JSON.stringify(plan));
+  const local = localPlans();
+  if (plan.private) {
+    local[plan.id] = plan;
+    saveLocalPlans(local);
+    store.plans.delete(plan.id);
+  } else {
+    store.plans.set(plan.id, JSON.stringify(plan));
+    if (local[plan.id]) {
+      delete local[plan.id];
+      saveLocalPlans(local);
+    }
+  }
 }
 
 export function deletePlan(store: Store, planId: string): void {
   store.plans.delete(planId);
+  const local = localPlans();
+  if (local[planId]) {
+    delete local[planId];
+    saveLocalPlans(local);
+  }
 }
 
 export function newPlanId(): string {

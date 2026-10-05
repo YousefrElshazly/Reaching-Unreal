@@ -93,6 +93,10 @@ export interface Plan {
   name: string;
   /** Which user this plan belongs to. Matches AppUser.id. */
   userId: string;
+  /** Kept on this device, outside the shared sync document. */
+  private?: boolean;
+  /** Hidden from the main Plans list until Archives is selected. */
+  archived?: boolean;
   /** ISO date (YYYY-MM-DD) of the first week's Saturday, inclusive. */
   startDate: string;
   /** ISO date (YYYY-MM-DD) of the last week's Saturday, inclusive. */

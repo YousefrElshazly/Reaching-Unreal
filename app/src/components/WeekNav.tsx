@@ -7,8 +7,6 @@ interface Props {
   currentId: string;
   onSelect: (id: string) => void;
   onShowSummary: () => void;
-  onShowPlans: () => void;
-  onShowSettings: () => void;
 }
 
 export function WeekNav({
@@ -16,8 +14,6 @@ export function WeekNav({
   currentId,
   onSelect,
   onShowSummary,
-  onShowPlans,
-  onShowSettings,
 }: Props) {
   const cal = useCalendar();
   const cur = weeks.find((w) => w.id === currentId);
@@ -84,20 +80,6 @@ export function WeekNav({
         className="px-3 py-1.5 rounded-md bg-white border border-stone-200 hover:bg-stone-50 text-sm font-medium"
       >
         Summary
-      </button>
-      <button
-        onClick={onShowPlans}
-        className="px-3 py-1.5 rounded-md bg-white border border-stone-200 hover:bg-stone-50 text-sm font-medium"
-      >
-        Plans
-      </button>
-      <button
-        onClick={onShowSettings}
-        className="px-3 py-1.5 rounded-md bg-white border border-stone-200 hover:bg-stone-50 text-sm font-medium"
-        title="Settings"
-        aria-label="Settings"
-      >
-        ⚙
       </button>
       <div className="ml-auto text-right">
         <div className="text-xs uppercase tracking-wider text-stone-500">
